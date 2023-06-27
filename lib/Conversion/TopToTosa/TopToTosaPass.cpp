@@ -142,10 +142,6 @@ public:
     ConversionTarget target(*ctx_);
     target.addLegalDialect<mlir::tosa::TosaDialect, mlir::func::FuncDialect>();
 
-    // Change data format for FuncOp
-    // patterns.add<ModifyFuncOp>(ctx_);
-    // applyPatternsAndFoldGreedily(module_, std::move(patterns));
-
     // Lower TOP Ops
     patterns.add<LowerTopWeightOp>(patterns.getContext(), includeWeight);
     populateTopToTosaConversionPatterns(&patterns);
