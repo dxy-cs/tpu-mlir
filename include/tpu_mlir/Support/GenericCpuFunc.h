@@ -105,7 +105,7 @@ private:
 };
 
 struct YoloDetParam {
-  std::string anchors;
+  std::vector<int64_t> anchors;
   std::vector<tensor_list_t> inputs;
   tensor_list_t output;
   int64_t net_input_h;
@@ -114,12 +114,10 @@ struct YoloDetParam {
   int64_t class_num;
   double nms_threshold;
   double obj_threshold;
-  bool tiny;
-  bool yolo_v4;
-  bool spp_net;
   int64_t num_boxes;
-  int64_t mask_group_size;
-  float mask[9];
+  int64_t agnostic_nms;
+  std::vector<int64_t> mask;
+  std::string version;
 };
 
 class YoloDetectionFunc {
@@ -129,7 +127,6 @@ public:
 
 private:
   YoloDetParam param_;
-  std::vector<float> _anchors;
 };
 
 struct PredictionResult {
@@ -142,14 +139,26 @@ struct PredictionResult {
   int classType;
 };
 
-class Yolo_v2_DetectionFunc {
+class YoloDetectionFunc_v2 {
 public:
-  Yolo_v2_DetectionFunc(YoloDetParam &param);
+  YoloDetectionFunc_v2(YoloDetParam &param);
   void invoke();
 
 private:
   YoloDetParam param_;
-  std::vector<float> _anchors;
+};
+
+/**
+ * @brief postprocess for yolov5 in case of 3-D output shape [b, total, 5 +
+ * cls_num]
+ */
+class Yolov5DetectionFunc {
+public:
+  Yolov5DetectionFunc(YoloDetParam &param);
+  void invoke();
+
+private:
+  YoloDetParam param_;
 };
 
 struct ProposalParam {
@@ -582,14 +591,14 @@ struct GridSamplerParam {
   bool align_corners;
 };
 
-
 class GridSamplerFunc {
 public:
   GridSamplerFunc(GridSamplerParam &para);
   float computeIndex(float coord, int size, int paddingMode, bool alignCorners);
 
   template <typename scalar_t>
-  scalar_t reflect_coordinates(scalar_t in, int64_t twice_low, int64_t twice_high);
+  scalar_t reflect_coordinates(scalar_t in, int64_t twice_low,
+                               int64_t twice_high);
 
   template <typename scalar_t>
   scalar_t clip_coordinates(scalar_t in, int64_t clip_limit);

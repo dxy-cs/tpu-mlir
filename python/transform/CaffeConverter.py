@@ -1519,9 +1519,9 @@ class CaffeConverter(BaseConverter):
         output_shape = input_shape
         attrs = {'loc': self.get_loc(layer.top[0])}
         new_op = top.TanHOp(self.mlir.get_tensor_type(output_shape),
-                               in_op,
-                               **attrs,
-                               ip=self.mlir.insert_point).output
+                            in_op,
+                            **attrs,
+                            ip=self.mlir.insert_point).output
         self.addOperand(layer.top[0], new_op)
 
     def convert_tile_op(self, layer):
@@ -1559,7 +1559,6 @@ class CaffeConverter(BaseConverter):
 
     def convert_yolo_detection_op(self, layer):
         assert (self.layerType(layer) == 'YoloDetection')
-        in_op = self.getOperand(layer.bottom[0])
         input_shape = self.getShape(layer.bottom[0])
 
         operands = list()
@@ -1567,15 +1566,26 @@ class CaffeConverter(BaseConverter):
             op = self.getOperand(bottom)
             operands.append(op)
         p = layer.yolo_detection_param
-
-        if not p.anchors:
-            if p.tiny:
-                p.anchors = "10,14,23,27,37,58,81,82,135,169,344,319"
-            elif p.yolo_v4:
-                p.anchors = "142,110,192,243,459,401,36,75,76,55,72,146,12,16,19,36,40,28"
-            else:
-                p.anchors = "10,13,16,30,33,23,30,61,62,45,59,119,116,90,156,198,373,326"
-
+        anchors = []
+        # yapf: disable
+        if p.anchors:
+            anchors = [int(d) for d in p.anchors.split(",")]
+        elif p.yolo_v4:
+            anchors = [142, 110, 192, 243, 459, 401, 36, 75, 76, 55, 72, 146, 12, 16, 19, 36, 40, 28]
+        elif p.tiny:
+            anchors = [10, 14, 23, 27, 37, 58, 81, 82, 135, 169, 344, 319]
+        else:
+            anchors = [10, 13, 16, 30, 33, 23, 30, 61, 62, 45, 59, 119, 116, 90, 156, 198, 373, 326]
+        # yapf: enable
+        assert (len(anchors) == 6 * len(operands))
+        if p.spp_net:
+            version = "yolov3_spp"
+        elif p.tiny:
+            version = "yolov3_tiny"
+        elif p.yolo_v4:
+            version = "yolov4"
+        else:
+            version = "yolov3"
         param = {
             'loc': self.get_loc(layer.top[0]),
             'net_input_h': p.net_input_h,
@@ -1583,11 +1593,9 @@ class CaffeConverter(BaseConverter):
             "nms_threshold": p.nms_threshold,
             "obj_threshold": p.obj_threshold,
             "keep_topk": p.keep_topk,
-            "spp_net": p.spp_net,
-            "tiny": p.tiny,
-            "yolo_v4": p.yolo_v4,
+            "version": StringAttr.get(version),
             "class_num": p.class_num,
-            "anchors": p.anchors
+            "anchors": anchors
         }
         output_shape = [input_shape[0], 1, p.keep_topk, 6]
         new_op = top.YoloDetectionOp(self.mlir.get_tensor_type(output_shape),

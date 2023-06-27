@@ -391,9 +391,10 @@ static inline float _softmax(float *probs, float *data, int input_stride,
    cell_idx)
 
 static void process_feature(detection *det, int *det_idx, float *feature,
-                            std::vector<int64_t> grid_size, float *anchor,
+                            std::vector<int64_t> grid_size, int64_t *anchor,
                             std::vector<int64_t> yolo_size,
-                            int64_t num_of_class, float obj_threshold) {
+                            int64_t num_of_class, float obj_threshold,
+                            std::string version = "yolov3") {
   int yolo_w = yolo_size[1];
   int yolo_h = yolo_size[0];
   // TPU_LOG_DEBUG("grid_size_h: %d\n", grid_size[0]);
@@ -437,33 +438,63 @@ static void process_feature(detection *det, int *det_idx, float *feature,
       // get coord now
       int grid_x = i % grid_size[1];
       int grid_y = i / grid_size[1];
-      float box_x = _sigmoid(
-          feature[GET_INDEX(i, j, COORD_X_INDEX, num_cell, num_of_class)],
-          false);
-      box_x += grid_x;
-      box_x /= grid_size[1];
-      float box_y = _sigmoid(
-          feature[GET_INDEX(i, j, COORD_Y_INDEX, num_cell, num_of_class)],
-          false);
-      box_y += grid_y;
-      box_y /= grid_size[0];
-      // anchor is in shape [3][2]
-      float box_w = std::exp(
-          feature[GET_INDEX(i, j, COORD_W_INDEX, num_cell, num_of_class)]);
-      box_w *= anchor[j * 2];
-      box_w /= yolo_w;
-      float box_h = std::exp(
-          feature[GET_INDEX(i, j, COORD_H_INDEX, num_cell, num_of_class)]);
-      box_h *= anchor[j * 2 + 1];
-      box_h /= yolo_h;
-      hit2++;
-      // DBG("  hit2 %d, conf = %f, cls = %d, coord = [%f, %f, %f, %f]\n",
-      //    hit2, box_max_score, box_max_cls, box_x, box_y, box_w, box_h);
-      det[idx].bbox = box{box_x, box_y, box_w, box_h};
-      det[idx].score = box_max_score;
-      det[idx].cls = box_max_cls;
-      idx++;
-      assert(idx <= MAX_DET);
+      if (version == "yolov5") {
+        float io_r_h = yolo_size[0] / grid_size[0];
+        float io_r_w = yolo_size[1] / grid_size[1];
+        float box_x = _sigmoid(
+            feature[GET_INDEX(i, j, COORD_X_INDEX, num_cell, num_of_class)],
+            false);
+        box_x = (box_x * 2 + grid_x - 0.5) * io_r_w;
+        float box_y = _sigmoid(
+            feature[GET_INDEX(i, j, COORD_Y_INDEX, num_cell, num_of_class)],
+            false);
+        box_y = (box_y * 2 + grid_y - 0.5) * io_r_h;
+        // anchor is in shape [3][2]
+        float box_w = _sigmoid(
+            feature[GET_INDEX(i, j, COORD_W_INDEX, num_cell, num_of_class)],
+            false);
+        box_w = (box_w * 2) * (box_w * 2) * anchor[j * 2];
+        float box_h = _sigmoid(
+            feature[GET_INDEX(i, j, COORD_H_INDEX, num_cell, num_of_class)],
+            false);
+        box_h = (box_h * 2) * (box_h * 2) * anchor[j * 2 + 1];
+        hit2++;
+        // DBG("  hit2 %d, conf = %f, cls = %d, coord = [%f, %f, %f, %f]\n",
+        //    hit2, box_max_score, box_max_cls, box_x, box_y, box_w, box_h);
+        det[idx].bbox = box{box_x, box_y, box_w, box_h};
+        det[idx].score = box_max_score;
+        det[idx].cls = box_max_cls;
+        idx++;
+        assert(idx <= MAX_DET);
+      } else {
+        float box_x = _sigmoid(
+            feature[GET_INDEX(i, j, COORD_X_INDEX, num_cell, num_of_class)],
+            false);
+        box_x += grid_x;
+        box_x /= grid_size[1];
+        float box_y = _sigmoid(
+            feature[GET_INDEX(i, j, COORD_Y_INDEX, num_cell, num_of_class)],
+            false);
+        box_y += grid_y;
+        box_y /= grid_size[0];
+        // anchor is in shape [3][2]
+        float box_w = std::exp(
+            feature[GET_INDEX(i, j, COORD_W_INDEX, num_cell, num_of_class)]);
+        box_w *= anchor[j * 2];
+        box_w /= yolo_w;
+        float box_h = std::exp(
+            feature[GET_INDEX(i, j, COORD_H_INDEX, num_cell, num_of_class)]);
+        box_h *= anchor[j * 2 + 1];
+        box_h /= yolo_h;
+        hit2++;
+        // DBG("  hit2 %d, conf = %f, cls = %d, coord = [%f, %f, %f, %f]\n",
+        //    hit2, box_max_score, box_max_cls, box_x, box_y, box_w, box_h);
+        det[idx].bbox = box{box_x, box_y, box_w, box_h};
+        det[idx].score = box_max_score;
+        det[idx].cls = box_max_cls;
+        idx++;
+        assert(idx <= MAX_DET);
+      }
     }
   }
   *det_idx = idx;
@@ -745,42 +776,10 @@ void DetectionOutputFunc::invoke() {
 }
 
 YoloDetectionFunc::YoloDetectionFunc(YoloDetParam &param) : param_(param) {
-  std::istringstream iss(param_.anchors);
-  std::string s;
-  while (std::getline(iss, s, ',')) {
-    _anchors.push_back(atof(s.c_str()));
-  }
   std::sort(param_.inputs.begin(), param_.inputs.end(),
             [](const tensor_list_t &a, const tensor_list_t &b) {
               return a.shape[3] > b.shape[3];
             });
-  if (param_.tiny) {
-    assert(param_.inputs.size() == 2);
-    if (_anchors.size() == 0) {
-      _anchors = {
-          10, 14, 23,  27,  37,  58, // layer23-conv (26*26)
-          81, 82, 135, 169, 344, 319 // layer16-conv (13*13)
-      };
-    }
-  } else {
-    assert(param_.inputs.size() == 3);
-    if (_anchors.size() == 0) {
-      if (param_.yolo_v4) {
-        _anchors = {
-            142, 110, 192, 243, 459, 401, // layer161-conv
-            36,  75,  76,  55,  72,  146, // layer150-conv
-            12,  16,  19,  36,  40,  28,  // layer139-conv
-        };
-      } else {
-        // Yolov3 default anchors
-        _anchors = {
-            10,  13, 16,  30,  33,  23,  // layer106-conv (52*52)
-            30,  61, 62,  45,  59,  119, // layer94-conv  (26*26)
-            116, 90, 156, 198, 373, 326  // layer82-conv  (13*13)
-        };
-      }
-    }
-  }
 }
 
 void YoloDetectionFunc::invoke() {
@@ -788,8 +787,8 @@ void YoloDetectionFunc::invoke() {
   memset(top_data, 0, param_.output.size);
   int batch = param_.output.shape[0];
   size_t bottom_count = param_.inputs.size();
-  assert(_anchors.size() == bottom_count * 6);
-  float(*anchors)[6] = (float(*)[6])_anchors.data();
+  assert(param_.anchors.size() == bottom_count * 6);
+  int64_t(*anchors)[6] = (int64_t(*)[6])param_.anchors.data();
 
   for (int b = 0; b < batch; ++b) {
     std::vector<std::vector<int64_t>> grid_size;
@@ -812,7 +811,7 @@ void YoloDetectionFunc::invoke() {
     for (size_t i = 0; i < features.size(); i++) {
       process_feature(det_raw, &det_raw_idx, features[i], grid_size[i],
                       &anchors[i][0], {param_.net_input_h, param_.net_input_w},
-                      param_.class_num, param_.obj_threshold);
+                      param_.class_num, param_.obj_threshold, param_.version);
     }
     nms(det_raw, det_raw_idx, param_.nms_threshold);
     int det_idx = 0;
@@ -1622,7 +1621,7 @@ void RetinaFaceDetectionFunc::invoke() {
 
 template <typename Dtype>
 void ApplyNms_opt(std::vector<PredictionResult> &boxes, std::vector<int> &idxes,
-                  Dtype threshold) {
+                  Dtype threshold, int agnostic_nms = 0) {
   int bbox_cnt = (int)boxes.size();
   // init the map
   uint32_t map[bbox_cnt / 32 + 1];
@@ -1648,7 +1647,12 @@ void ApplyNms_opt(std::vector<PredictionResult> &boxes, std::vector<int> &idxes,
       Bbox2.w = boxes[j].w;
       Bbox2.h = boxes[j].h;
 
-      Dtype iou = box_iou(Bbox1, Bbox2);
+      Dtype iou;
+      if (agnostic_nms == 0 && boxes[i].classType == boxes[j].classType) {
+        iou = box_iou(Bbox1, Bbox2);
+      } else {
+        iou = (Dtype)0;
+      }
       if (iou >= threshold) {
         map[j / 32] &= ~(1 << (j % 32));
       }
@@ -1662,52 +1666,20 @@ void ApplyNms_opt(std::vector<PredictionResult> &boxes, std::vector<int> &idxes,
   }
 }
 
-Yolo_v2_DetectionFunc::Yolo_v2_DetectionFunc(YoloDetParam &param)
+YoloDetectionFunc_v2::YoloDetectionFunc_v2(YoloDetParam &param)
     : param_(param) {
-  std::istringstream iss(param_.anchors);
-  std::string s;
-  while (std::getline(iss, s, ',')) {
-    _anchors.push_back(atof(s.c_str()));
-  }
   std::sort(param_.inputs.begin(), param_.inputs.end(),
             [](const tensor_list_t &a, const tensor_list_t &b) {
               return a.shape[3] > b.shape[3];
             });
-  if (param_.tiny) {
-    assert(param_.inputs.size() == 2);
-    if (_anchors.size() == 0) {
-      _anchors = {
-          10, 14, 23,  27,  37,  58, // layer23-conv (26*26)
-          81, 82, 135, 169, 344, 319 // layer16-conv (13*13)
-      };
-    }
-  } else {
-    assert(param_.inputs.size() == 3);
-    if (_anchors.size() == 0) {
-      if (param_.yolo_v4) {
-        _anchors = {
-            142, 110, 192, 243, 459, 401, // layer161-conv
-            36,  75,  76,  55,  72,  146, // layer150-conv
-            12,  16,  19,  36,  40,  28,  // layer139-conv
-        };
-      } else {
-        // Yolov3 default anchors
-        _anchors = {
-            10,  13, 16,  30,  33,  23,  // layer106-conv (52*52)
-            30,  61, 62,  45,  59,  119, // layer94-conv  (26*26)
-            116, 90, 156, 198, 373, 326  // layer82-conv  (13*13)
-        };
-      }
-    }
-  }
 }
 
-void Yolo_v2_DetectionFunc::invoke() {
+void YoloDetectionFunc_v2::invoke() {
   auto top_data = param_.output.ptr;
   memset(top_data, 0, param_.output.size);
   int batch_num = param_.inputs[0].shape[0];
   int bottom_num = param_.inputs.size();
-  assert(_anchors.size() == bottom_num * 6);
+  assert(param_.anchors.size() == bottom_num * 6);
   int len = 4 + param_.class_num + 1;
   int mask_offset = 0;
   const int num = batch_num;
@@ -1762,36 +1734,61 @@ void Yolo_v2_DetectionFunc::invoke() {
             int arg_max = std::distance(
                 class_score.begin(),
                 std::max_element(class_score.begin(), class_score.end()));
+            if (param_.version == "yolov5") {
+              sigmoid_batch(swap_data, 6);
+              swap_data[1] = swap_data[0] * swap_data[1];
+              if (swap_data[1] > param_.obj_threshold) {
+                [&](std::vector<float> &b, float *x, int64_t *biases, int n,
+                    int i, int j, int lw, int lh, int w, int h) {
+                  b.clear();
+                  b.push_back((i + x[0] * 2 - 0.5) * w / lw);
+                  b.push_back((j + x[1] * 2 - 0.5) * h / lh);
+                  b.push_back((x[2] * 2) * (x[2] * 2) * biases[2 * n]);
+                  b.push_back((x[3] * 2) * (x[3] * 2) * biases[2 * n + 1]);
+                }(pred, &swap_data[2], param_.anchors.data(),
+                  param_.mask[n + mask_offset], cx, cy, w, h,
+                  param_.net_input_w, param_.net_input_h);
 
-            sigmoid_batch(swap_data, 4);
-            // Pmax = Pmax * Po
-            swap_data[1] = swap_data[0] * swap_data[1];
+                predict.idx = b;
+                predict.x = pred[0];
+                predict.y = pred[1];
+                predict.w = pred[2];
+                predict.h = pred[3];
+                predict.classType = arg_max;
+                predict.confidence = swap_data[1];
+                predicts.push_back(predict);
+              }
+            } else {
+              sigmoid_batch(swap_data, 4);
+              // Pmax = Pmax * Po
+              swap_data[1] = swap_data[0] * swap_data[1];
 
-            if (swap_data[1] > param_.obj_threshold) {
-              [&](std::vector<float> &b, float *x, float *biases, int n, int i,
-                  int j, int lw, int lh, int w, int h) {
-                b.clear();
-                b.push_back((i + (x[0])) / lw);
-                b.push_back((j + (x[1])) / lh);
-                b.push_back(exp(x[2]) * biases[2 * n] / (w));
-                b.push_back(exp(x[3]) * biases[2 * n + 1] / (h));
-              }(pred, &swap_data[2], _anchors.data(),
-                param_.mask[n + mask_offset], cx, cy, w, h, param_.net_input_w,
-                param_.net_input_h);
+              if (swap_data[1] > param_.obj_threshold) {
+                [&](std::vector<float> &b, float *x, int64_t *biases, int n,
+                    int i, int j, int lw, int lh, int w, int h) {
+                  b.clear();
+                  b.push_back((i + (x[0])) / lw);
+                  b.push_back((j + (x[1])) / lh);
+                  b.push_back(exp(x[2]) * biases[2 * n] / (w));
+                  b.push_back(exp(x[3]) * biases[2 * n + 1] / (h));
+                }(pred, &swap_data[2], param_.anchors.data(),
+                  param_.mask[n + mask_offset], cx, cy, w, h,
+                  param_.net_input_w, param_.net_input_h);
 
-              predict.idx = b;
-              predict.x = pred[0];
-              predict.y = pred[1];
-              predict.w = pred[2];
-              predict.h = pred[3];
-              predict.classType = arg_max;
-              predict.confidence = swap_data[1];
-              predicts.push_back(predict);
+                predict.idx = b;
+                predict.x = pred[0];
+                predict.y = pred[1];
+                predict.w = pred[2];
+                predict.h = pred[3];
+                predict.classType = arg_max;
+                predict.confidence = swap_data[1];
+                predicts.push_back(predict);
+              }
             }
           }
         }
       }
-      mask_offset += param_.mask_group_size;
+      mask_offset += param_.num_boxes;
     }
 
     // NMS for each image
@@ -1845,6 +1842,92 @@ void Yolo_v2_DetectionFunc::invoke() {
       top_data[i * 7 + 5] = total_preds[i].w;
       top_data[i * 7 + 6] = total_preds[i].h;
     }
+  }
+}
+
+Yolov5DetectionFunc::Yolov5DetectionFunc(YoloDetParam &param)
+    : param_(param) {
+}
+
+void Yolov5DetectionFunc::invoke() {
+  auto top_data = param_.output.ptr;
+  memset(top_data, 0, param_.output.size);
+  int batch_num = param_.inputs[0].shape[0];
+  int box_num = param_.inputs[0].shape[1];
+  int box_len = param_.inputs[0].shape[2];
+  int agnostic_nms = param_.agnostic_nms;
+
+  std::vector<PredictionResult> total_preds;
+  // #pragma omp parallel for schedule(static, omp_schedule(batch_num * 4))
+  for (int b = 0; b < batch_num; b++) {
+    std::vector<PredictionResult> preds;
+    //================================
+    // box decode
+    //================================
+    for (int j = 0; j < box_num; j++) {
+      const float *input_data =
+          param_.inputs[0].ptr + b * box_num * box_len + j * box_len;
+      if (input_data[4] > param_.obj_threshold) {
+        float max_value = -10000;
+        int max_idx = 0;
+        for (int l = 5; l < box_len; l++) {
+          if (input_data[4] * input_data[l] > max_value) {
+            max_value = input_data[4] * input_data[l];
+            max_idx = l - 5;
+          }
+        }
+        if (max_value >= param_.obj_threshold) {
+          PredictionResult pred;
+          pred.classType = max_idx;
+          pred.confidence = max_value;
+          pred.idx = b;
+          pred.x = input_data[0];
+          pred.y = input_data[1];
+          pred.w = input_data[2];
+          pred.h = input_data[3];
+          preds.push_back(pred);
+        }
+      }
+    }
+    //================================
+    // NMS for each image
+    //================================
+    std::vector<int> idxes;
+    idxes.clear();
+
+    int num_kept = 0;
+    if (preds.size() > 0) {
+      std::stable_sort(
+          preds.begin(), preds.end(),
+          [](const PredictionResult &box1, const PredictionResult &box2) {
+            return box1.confidence > box2.confidence;
+          });
+
+      ApplyNms_opt(preds, idxes, param_.nms_threshold, agnostic_nms);
+      num_kept = idxes.size();
+
+      if (param_.keep_topk > 0) {
+        if (num_kept > param_.keep_topk)
+          num_kept = param_.keep_topk;
+      } else {
+        if (num_kept > KEEP_TOP_K)
+          num_kept = KEEP_TOP_K;
+      }
+
+      for (int i = 0; i < num_kept; i++) {
+        total_preds.push_back(preds[idxes[i]]);
+      }
+    }
+  }
+
+  for (int i = 0; i < total_preds.size(); i++) {
+    top_data[i * 7 + 0] = total_preds[i].idx;        // Image_Id
+    top_data[i * 7 + 1] = total_preds[i].classType;  // label
+    top_data[i * 7 + 2] = total_preds[i].confidence; // confidence
+    top_data[i * 7 + 3] = total_preds[i].x;
+    top_data[i * 7 + 4] = total_preds[i].y;
+    top_data[i * 7 + 5] = total_preds[i].w;
+    top_data[i * 7 + 6] = total_preds[i].h;
   }
 }
 
@@ -1905,8 +1988,13 @@ int NmsFunc::invoke() {
     float score;
     int begin_index;
   };
+  //align with tpu algorithm
   auto cmp = [](const Candidate i, const Candidate j) {
-    return i.score < j.score;
+    if (i.score != j.score)
+      return i.score < j.score;
+    else {
+      return i.box_index > j.box_index;
+    }
   };
 
   int num_selected_indices = 0;
@@ -2025,8 +2113,10 @@ void BMCpuOp::get_grid_sampler_param() {
   cpu_grid_sampler_param_t cpu_param{};
   mlir::DictionaryAttr paramDic = op_.getParam().value();
   cpu_param.mode = paramDic.get("mode").cast<IntegerAttr>().getInt();
-  cpu_param.padding_mode = paramDic.get("padding_mode").cast<IntegerAttr>().getInt();
-  cpu_param.align_corners = paramDic.get("align_corners").cast<BoolAttr>().getValue();
+  cpu_param.padding_mode =
+      paramDic.get("padding_mode").cast<IntegerAttr>().getInt();
+  cpu_param.align_corners =
+      paramDic.get("align_corners").cast<BoolAttr>().getValue();
   this->param_size = sizeof(cpu_grid_sampler_param_t);
   this->param = (void *)malloc(this->param_size);
   memcpy(this->param, &cpu_param, this->param_size);
@@ -2612,14 +2702,14 @@ GatherndFunc::GatherndFunc(GatherNDParam &param) : param_(param) {}
 
 uint64_t GatherndFunc::gather_offset(std::vector<int64_t> input_shape,
                                      std::vector<int> gather_index) {
-    uint64_t offset = 0;
-    int dim_size = gather_index.size();
-    uint64_t gap = 1;
-    for (int i = dim_size - 1; i >= 0; i--) {
-        offset += gather_index[i] * gap;
-        gap *= input_shape[i];
-    }
-    return offset;
+  uint64_t offset = 0;
+  int dim_size = gather_index.size();
+  uint64_t gap = 1;
+  for (int i = dim_size - 1; i >= 0; i--) {
+    offset += gather_index[i] * gap;
+    gap *= input_shape[i];
+  }
+  return offset;
 }
 
 void GatherndFunc::invoke() {
@@ -2753,7 +2843,7 @@ void ScatterNDFunc::invoke() {
     auto index_data = indices + idx * index_depth_;
     int out_offset = 0;
     for (int i = 0; i < outer_stride.size(); ++i) {
-      out_offset += index_data[i] * outer_stride[i];
+      out_offset += (int)index_data[i] * outer_stride[i];
     }
     auto out_ = out + out_offset;
     auto updates_data = updates + idx * outer_stride.back();
@@ -2779,7 +2869,7 @@ scalar_t GridSamplerFunc::clip_coordinates(scalar_t in, int64_t clip_limit) {
 // can be represented as ints.
 template <typename scalar_t>
 scalar_t GridSamplerFunc::reflect_coordinates(scalar_t in, int64_t twice_low,
-                                           int64_t twice_high) {
+                                              int64_t twice_high) {
   if (twice_low == twice_high) {
     return static_cast<scalar_t>(0);
   }
@@ -2844,18 +2934,16 @@ void GridSamplerFunc::invoke() {
   const int OH = grid_shape[1];
   const int OW = grid_shape[2];
 
-#pragma omp parallel for schedule(static, omp_schedule(N * C))
+#pragma omp parallel for schedule(static, omp_schedule(N *C))
   for (int n = 0; n < N; ++n) {
     const float *input = input_tensor.ptr + n * C * IH * IW;
     const float *grid = grid_tensor.ptr + n * OH * OW * 2;
     float *output = output_tensor.ptr + n * C * OH * OW;
     for (int h = 0; h < OH; ++h) {
       for (int w = 0; w < OW; ++w) {
-        auto fx =
-            computeIndex(*grid, IW, padding_mode, align_corners);
+        auto fx = computeIndex(*grid, IW, padding_mode, align_corners);
         ++grid;
-        auto fy =
-            computeIndex(*grid, IH, padding_mode, align_corners);
+        auto fy = computeIndex(*grid, IH, padding_mode, align_corners);
         ++grid;
         switch (mode) {
         case GridSamplerBilinear: {

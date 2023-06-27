@@ -79,7 +79,6 @@
     $ model_deploy.py \
        --mlir resnet.mlir \
        --quantize INT8 \
-       # --asymmetric \
        --calibration_table somenet_cali_table \
        --chip bm1684x \
        --test_input somenet_in_f32.npz \
@@ -135,7 +134,6 @@
    $ model_deploy.py \
        --mlir resnet50_tf.mlir \
        --quantize INT8 \
-       --asymmetric \
        --chip bm1684x \
        --test_input resnet50_tf_in_f32.npz \
        --test_reference resnet50_tf_top_outputs.npz \
@@ -207,10 +205,16 @@ model_transform.py
      - 图片每个通道的比值, 默认为1.0,1.0,1.0
    * - pixel_format
      - 否
-     - 图片类型, 可以是rgb、bgr、gray、rgbd四种情况
+     - 图片类型, 可以是rgb、bgr、gray、rgbd四种情况, 默认为bgr
+   * - channel_format
+     - 否
+     - 通道类型，对于图片输入可以是nhwc或nchw, 非图片输入则为none, 默认是nchw
    * - output_names
      - 否
      - 指定输出的名称, 如果不指定, 则用模型的输出; 指定后用该指定名称做输出
+   * - add_postprocess
+     - 否
+     - 将后处理融合到模型中, 指定后处理类型, 目前支持yolov3、yolov3_tiny、yolov5和ssd后处理
    * - test_input
      - 否
      - 指定输入文件用于验证, 可以是图片或npy或npz; 可以不指定, 则不会正确性验证
@@ -223,9 +227,6 @@ model_transform.py
    * - mlir
      - 是
      - 指定输出的mlir文件名称和路径
-   * - post_handle_type
-     - 否
-     - 将后处理融合到模型中，指定后处理类型， 目前只支持yolo和ssd后处理
 
 转成mlir文件后, 会生成一个 ``${model_name}_in_f32.npz`` 文件, 该文件是后续模型的输入文件。
 
@@ -408,6 +409,9 @@ model_deploy.py
    * - excepts
      - 否
      - 指定需要排除验证的网络层的名称, 多个用,隔开
+   * - op_divide
+     - 否
+     - cv183x/cv182x/cv181x/cv180x only, 尝试将较大的op拆分为多个小op以达到节省ion内存的目的, 适用少数特定模型
    * - model
      - 是
      - 指定输出的model文件名称和路径
@@ -476,7 +480,7 @@ npz在TPU-MLIR工程中会大量用到, 包括输入输出的结果等等。npz_
 visual.py
 ~~~~~~~~~~~~~~~~
 
-量化网络如果遇到精度对比不过或者比较差，可以使用此工具逐层可视化对比浮点网络和量化后网络的不同，方便进行定位和手动调整。
+量化网络如果遇到精度对比不过或者比较差, 可以使用此工具逐层可视化对比浮点网络和量化后网络的不同, 方便进行定位和手动调整。
 
 执行命令可参考如下：
 
@@ -498,9 +502,9 @@ visual.py
    * - quant_mlir
      - 量化后网络mlir文件
    * - input
-     - 测试输入数据，可以是图像文件或者npz文件
+     - 测试输入数据, 可以是图像文件或者npz文件
    * - port
-     - 使用的TCP端口，默认10000，需要在启动docker时映射至系统端口
+     - 使用的TCP端口, 默认10000, 需要在启动docker时映射至系统端口
    * - manual_run
-     - 启动后是否自动进行网络推理比较，默认False，会自动推理比较
+     - 启动后是否自动进行网络推理比较, 默认False, 会自动推理比较
 

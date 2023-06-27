@@ -66,7 +66,7 @@ customization_format_attributes = {
     'RGB_PACKED': ('rgb', 'nhwc'),
     'BGR_PLANAR': ('bgr', 'nchw'),
     'BGR_PACKED': ('bgr', 'nhwc'),
-    'GRAYSCALE': ('bgr', 'nchw'),
+    'GRAYSCALE': ('gray', 'nchw'),
     'YUV420_PLANAR': ('bgr', 'nchw'),
     'YUV_NV12': ('bgr', 'nchw'),
     'YUV_NV21': ('bgr', 'nchw'),
@@ -86,6 +86,44 @@ def vis(img, boxes, scores, cls_ids, conf=0.5, class_names=None):
         y0 = int(box[1])
         x1 = int(box[2])
         y1 = int(box[3])
+        color = (_COLORS[cls_id] * 255).astype(np.uint8).tolist()
+        text = '{}:{:.1f}%'.format(class_names[cls_id], score * 100)
+        txt_color = (0, 0, 0) if np.mean(_COLORS[cls_id]) > 0.5 else (255, 255, 255)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        txt_size = cv2.getTextSize(text, font, 0.4, 1)[0]
+        cv2.rectangle(img, (x0, y0), (x1, y1), color, 1)
+
+        txt_bk_color = (_COLORS[cls_id] * 255 * 0.7).astype(np.uint8).tolist()
+        cv2.rectangle(img, (x0, y0 + 1), (x0 + txt_size[0] + 1, y0 + int(1.5 * txt_size[1])),
+                      txt_bk_color, -1)
+        cv2.putText(img, text, (x0, y0 + txt_size[1]), font, 0.4, txt_color, thickness=1)
+
+    return img
+
+
+def vis2(img, dets, input_shape, class_names=None):
+    shape = dets.shape
+    num = shape[-2]
+    img_h, img_w = img.shape[0:2]
+    for i in range(num):
+        d = dets[0][0][i]
+        cls_id = int(d[1])
+        score = d[2]
+        x, y, w, h = d[3], d[4], d[5], d[6]
+        r = min(input_shape[0] / img.shape[0], input_shape[1] / img.shape[1])
+        new_img_h = img_h * r
+        new_img_w = img_w * r
+        x -= ((input_shape[1] - new_img_w) / 2)
+        y -= ((input_shape[0] - new_img_h) / 2)
+        x /= r
+        y /= r
+        w /= r
+        h /= r
+        x0 = int(x - w / 2)
+        y0 = int(y - h / 2)
+        x1 = int(x + w / 2)
+        y1 = int(y + h / 2)
         color = (_COLORS[cls_id] * 255).astype(np.uint8).tolist()
         text = '{}:{:.1f}%'.format(class_names[cls_id], score * 100)
         txt_color = (0, 0, 0) if np.mean(_COLORS[cls_id]) > 0.5 else (255, 255, 255)
@@ -256,17 +294,9 @@ def postproc(outputs, imsize, top, left, anchors=ANCHORS):
     return scores, boxes_xyxy
 
 
-def refine_cvi_output(output):
-    new_output = {}
-    for k in output.keys():
-        if k.endswith("_f32"):
-            out = output[k]
-            n, c, h, w = out.shape[0], out.shape[1], out.shape[2], out.shape[3]
-            new_output[k] = out.reshape(n, c, h, w // 85, 85)
-    return new_output
-
 
 def parse_args():
+    # yapf: disable
     parser = argparse.ArgumentParser(description='Inference Yolo v5 network.')
     parser.add_argument("--model", type=str, required=True, help="Model definition file")
     parser.add_argument("--net_input_dims", type=str, default="640,640", help="(h,w) of net input")
@@ -275,14 +305,9 @@ def parse_args():
     parser.add_argument("--conf_thres", type=float, default=0.001, help="Confidence threshold")
     parser.add_argument("--iou_thres", type=float, default=0.6, help="NMS IOU threshold")
     parser.add_argument("--score_thres", type=float, default=0.5, help="Score of the result")
-    parser.add_argument("--fuse_preprocess",
-                        action='store_true',
-                        help="if the model fused prerpocess")
-    parser.add_argument("--customization_format",
-                        default='',
-                        type=str.upper,
-                        choices=supported_customization_format,
-                        help="pixel and channel format of original input data")
+    parser.add_argument("--fuse_preprocess", action='store_true', help="if the model fused preprocess")
+    parser.add_argument("--fuse_postprocess", action='store_true', help="if the model fused postprocess")
+    # yapf: enable
     args = parser.parse_args()
     return args
 
@@ -290,18 +315,13 @@ def parse_args():
 def main():
     args = parse_args()
     input_shape = tuple(map(int, args.net_input_dims.split(',')))
-    fuse_pre = args.fuse_preprocess
-    customization_format = args.customization_format
     pixel_format = 'rgb'
     channel_format = 'nchw'
-    if (fuse_pre and customization_format):
-        pixel_format = customization_format_attributes[customization_format][0]
-        channel_format = customization_format_attributes[customization_format][1]
-
     origin_img = cv2.imread(args.input)
-    img, ratio, top, left = preproc(origin_img, input_shape, pixel_format, channel_format, fuse_pre)
+    img, ratio, top, left = preproc(origin_img, input_shape, pixel_format, channel_format,
+                                    args.fuse_preprocess)
     img = np.expand_dims(img, axis=0)
-    if (not fuse_pre):
+    if (not args.fuse_preprocess):
         img /= 255.  # 0 - 255 to 0.0 - 1.0
     data = {"data": img}  # input name from model
     output = dict()
@@ -311,19 +331,21 @@ def main():
         output = torch_inference(data, args.model, False)
     elif args.model.endswith('.mlir'):
         output = mlir_inference(data, args.model, False)
-    elif args.model.endswith(".bmodel") or args.model.endswith(".cvimodel"):
+    elif args.model.endswith(".bmodel"):
         output = model_inference(data, args.model)
-        if args.model.endswith(".cvimodel"):
-            output = refine_cvi_output(output)
+    elif args.model.endswith(".cvimodel"):
+        output = model_inference(data, args.model, False)
     else:
         raise RuntimeError("not support modle file:{}".format(args.model))
-    scores, boxes_xyxy = postproc(output, input_shape, top, left)
-    dets = multiclass_nms(boxes_xyxy,
-                          scores,
-                          iou_thres=args.iou_thres,
-                          score_thres=args.conf_thres,
-                          class_agnostic=True)
-    if dets is not None:
+    if not args.fuse_postprocess:
+        scores, boxes_xyxy = postproc(output, input_shape, top, left)
+        dets = multiclass_nms(boxes_xyxy,
+                              scores,
+                              iou_thres=args.iou_thres,
+                              score_thres=args.conf_thres,
+                              class_agnostic=True)
+        if dets is None:
+            raise RuntimeError("model:[{}] nothing detect out:{}".format(args.model, args.input))
         final_boxes, final_scores, final_cls_inds = dets[:, :4], dets[:, 4], dets[:, 5]
         final_boxes /= ratio
         fix_img = vis(origin_img,
@@ -334,7 +356,9 @@ def main():
                       class_names=COCO_CLASSES)
         cv2.imwrite(args.output, fix_img)
     else:
-        raise RuntimeError("model:[{}] nothing detect out:{}".format(args.model, args.input))
+        dets = output['yolo_post']
+        fix_img = vis2(origin_img, dets, input_shape, class_names=COCO_CLASSES)
+        cv2.imwrite(args.output, fix_img)
 
 
 if __name__ == '__main__':

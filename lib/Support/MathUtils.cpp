@@ -947,9 +947,10 @@ int StopForAxis(const int *stop_indices, const int *strides, const int mask,
   return stop;
 }
 
-void topk_indices(std::vector<std::pair<int, float>> &result,
-                  const float *items, int num_elem, int k, bool largest) {
-  using pair_t = std::pair<int, float>;
+template <typename T>
+void topk_indices(std::vector<std::pair<int, T>> &result, const T *items,
+                  int num_elem, int k, bool largest) {
+  using pair_t = std::pair<int, T>;
   auto cmp_large = [](pair_t const &item1, pair_t const &item2) {
     return (item1.second > item2.second) ||
            (item1.second == item2.second && item1.first < item2.first);
@@ -966,6 +967,13 @@ void topk_indices(std::vector<std::pair<int, float>> &result,
   std::partial_sort_copy(topk.begin(), topk.end(), result.begin(), result.end(),
                          cmp);
 }
+
+template void topk_indices(std::vector<std::pair<int, float>> &result,
+                           const float *items, int num_elem, int k,
+                           bool largest);
+template void topk_indices(std::vector<std::pair<int, int64_t>> &result,
+                           const int64_t *items, int num_elem, int k,
+                           bool largest);
 
 template <typename T>
 std::vector<int64_t> shape_expand_dim(const std::vector<T> &shape, int dims) {
@@ -1147,44 +1155,47 @@ bool permute_reset(const std::vector<int64_t> &shape,
 }
 
 template <typename T>
-void function_permute(T *from, T *to, const std::vector<int64_t> &shape_5,
-                      const std::vector<int64_t> &order_5) {
-  int64_t in = shape_5[0];
-  int64_t ic = shape_5[1];
-  int64_t id = shape_5[2];
-  int64_t ih = shape_5[3];
-  int64_t iw = shape_5[4];
-  int64_t o0 = order_5[0];
-  int64_t o1 = order_5[1];
-  int64_t o2 = order_5[2];
-  int64_t o3 = order_5[3];
-  int64_t o4 = order_5[4];
-  // clang-format on
-  for (int n = 0; n < in; n++) {
-    for (int c = 0; c < ic; c++) {
-      for (int d = 0; d < id; d++) {
-        for (int h = 0; h < ih; h++) {
-          for (int w = 0; w < iw; w++) {
-            int cur[5] = {n, c, d, h, w};
-            int in_idx = w + h * iw + d * iw * ih + c * id * ih * iw +
-                         n * ic * id * ih * iw;
-            int out_idx =
-                cur[o4] + cur[o3] * shape_5[o4] +
-                cur[o2] * shape_5[o4] * shape_5[o3] +
-                cur[o1] * shape_5[o4] * shape_5[o3] * shape_5[o2] +
-                cur[o0] * shape_5[o4] * shape_5[o3] * shape_5[o2] * shape_5[o1];
-            to[out_idx] = from[in_idx];
+void function_permute(T *from, T *to, const std::vector<int64_t> &shape,
+                      const std::vector<int64_t> &order) {
+  std::vector<int64_t> shape_6 = shape;
+  std::vector<int64_t> order_6 = order;
+  // convert to 6-dim
+  for (int dim = shape.size(); dim < 6; ++dim) {
+    shape_6.push_back(1);
+    order_6.push_back(dim);
+  }
+  int64_t in = shape_6[0], ic = shape_6[1], it = shape_6[2], id = shape_6[3],
+          ih = shape_6[4], iw = shape_6[5];
+  int64_t o0 = order_6[0], o1 = order_6[1], o2 = order_6[2], o3 = order_6[3],
+          o4 = order_6[4], o5 = order_6[5];
+  for (int n = 0; n < in; ++n) {
+    for (int c = 0; c < ic; ++c) {
+      for (int t = 0; t < it; ++t) {
+        for (int d = 0; d < id; ++d) {
+          for (int h = 0; h < ih; h++) {
+            for (int w = 0; w < iw; w++) {
+              int cur[6] = {n, c, t, d, h, w};
+              int in_idx = w + h * iw + d * iw * ih + t * id * ih * iw +
+                           c * it * id * ih * iw + n * ic * it * id * ih * iw;
+              int out_idx = cur[o5] + cur[o4] * shape_6[o5] +
+                            cur[o3] * shape_6[o5] * shape_6[o4] +
+                            cur[o2] * shape_6[o5] * shape_6[o4] * shape_6[o3] +
+                            cur[o1] * shape_6[o5] * shape_6[o4] * shape_6[o3] *
+                                shape_6[o2] +
+                            cur[o0] * shape_6[o5] * shape_6[o4] * shape_6[o3] *
+                                shape_6[o2] * shape_6[o1];
+              to[out_idx] = from[in_idx];
+            }
           }
         }
       }
     }
   }
-  // clang-format off
 }
 
-template
-void function_permute(float *from, float *to, const std::vector<int64_t> &shape_5,
-                      const std::vector<int64_t> &order_5);
+template void function_permute(float *from, float *to,
+                               const std::vector<int64_t> &shape,
+                               const std::vector<int64_t> &order);
 
 bool compare(float a, float b, llvm::StringRef mode) {
   if (mode == "Equal" || mode == "Not") {
@@ -1287,8 +1298,7 @@ int32_t exp_on_negative_values(int input, int int_bits) {
   return result;
 }
 
-void swap_dim_data(float *input, float *output,
-                   std::vector<int64_t> &ishape,
+void swap_dim_data(float *input, float *output, std::vector<int64_t> &ishape,
                    std::vector<int64_t> &offsets) {
   int axis = offsets.size();
   int64_t outer_size = 1, inner_size = 1;
@@ -1326,12 +1336,13 @@ binary_add(float *a, float *b, const llvm::ArrayRef<int64_t> &a_shape,
   for (int i = 0; i < max_ndim; i++) {
     o_shape.push_back(std::max(a_shape_[i], b_shape_[i]));
   }
-  auto num_output = std::accumulate(o_shape.begin(), o_shape.end(), 1, std::multiplies<int64_t>());
+  auto num_output = std::accumulate(o_shape.begin(), o_shape.end(), 1,
+                                    std::multiplies<int64_t>());
   auto output = std::make_shared<std::vector<float>>(num_output);
   Binary add;
   add.lhs(a, a_shape_)
       .rhs(b, b_shape_)
-      .dst(output->data(),o_shape)
+      .dst(output->data(), o_shape)
       .algorithem(algorithm::binary_add)
       .setup();
   add.run();
@@ -1349,28 +1360,30 @@ binary_mul(float *a, float *b, const llvm::ArrayRef<int64_t> &a_shape,
   for (int i = 0; i < max_ndim; i++) {
     o_shape.push_back(std::max(a_shape_[i], b_shape_[i]));
   }
-  auto num_output = std::accumulate(o_shape.begin(), o_shape.end(), 1, std::multiplies<int64_t>());
+  auto num_output = std::accumulate(o_shape.begin(), o_shape.end(), 1,
+                                    std::multiplies<int64_t>());
   auto output = std::make_shared<std::vector<float>>(num_output);
   Binary mul;
   mul.lhs(a, a_shape_)
       .rhs(b, b_shape_)
-      .dst(output->data(),o_shape)
+      .dst(output->data(), o_shape)
       .algorithem(algorithm::binary_mul)
       .setup();
   mul.run();
   return std::move(output);
 }
-//Accoring to output_index, get thr broadcast input_index
-int getBcastIndex(int out_index, std::vector<int64_t> &output_shape, std::vector<int64_t> &input_shape) {
+// Accoring to output_index, get thr broadcast input_index
+int getBcastIndex(int out_index, std::vector<int64_t> &output_shape,
+                  std::vector<int64_t> &input_shape) {
   int dim = output_shape.size();
   std::vector<int64_t> out_slice_index(dim);
   std::vector<int64_t> input_slice_index(dim);
-  //calculate each dim index from out_index
+  // calculate each dim index from out_index
   int multiplies = 1;
-  //int mod = 1;
+  // int mod = 1;
   int input_index = 0;
   for (int i = dim - 1; i >= 0; i--) {
-    //mod = output_shape[i];
+    // mod = output_shape[i];
     out_slice_index[i] = out_index / multiplies % output_shape[i];
     if (input_shape[i] == 1) {
       input_slice_index[i] = 0;
@@ -1387,4 +1400,37 @@ int getBcastIndex(int out_index, std::vector<int64_t> &output_shape, std::vector
   return input_index;
 }
 
+bool is_all_int8(const std::vector<float> &data, float scale, bool sign) {
+  if (sign == false) {
+    // all uint8 ?
+    for (auto d : data) {
+      d *= scale;
+      if (d != (uint8_t)(d)) {
+        return false;
+      }
+    }
+  } else {
+    // all int8 ?
+    for (auto d : data) {
+      d *= scale;
+      if (d != (int8_t)(d)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool to_all_int8(const std::vector<float> &data, float &scale, bool sign) {
+  float s = 0;
+  for (int i = 0; i < 7; i++) {
+    s = std::pow(2, i);
+    auto ret = is_all_int8(data, s, sign);
+    if (ret) {
+      scale = s;
+      return true;
+    }
+  }
+  return false;
+}
 } // namespace tpu_mlir

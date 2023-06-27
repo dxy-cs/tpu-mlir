@@ -52,12 +52,11 @@ def _os_system(cmd: list, save_log: bool = False):
         _os_system_log(cmd_str)
 
 
-
-def mlir_opt_for_top(mlirfile, opt_mlirfile, post_handle_type=""):
-    cmd = ["tpuc-opt", mlirfile, "--shape-infer", "--canonicalize"]
-    if len(post_handle_type) > 0:
-        cmd.extend([f"--post-handle=\"type={post_handle_type}\""])
-    cmd.extend(["--extra-optimize", "-o", opt_mlirfile])
+def mlir_opt_for_top(mlirfile, opt_mlirfile, add_postprocess=""):
+    cmd = ["tpuc-opt", mlirfile, "--shape-infer"]
+    if len(add_postprocess) > 0:
+        cmd.extend([f"--add-postprocess=\"type={add_postprocess}\""])
+    cmd.extend(["--canonicalize", "--extra-optimize", "-o", opt_mlirfile])
     _os_system(cmd)
 
 
@@ -73,10 +72,7 @@ def mlir_lowering(top_mlir: str,
                   aligned_input: bool = False):
     cmd = ["tpuc-opt", top_mlir, "--chip-assign=\"chip={}\"".format(chip.lower())]
     mode = mode.upper()
-    if mode != 'INT8':
-        asymmetric = True
-    if mode == 'INT4':
-        asymmetric = False
+    asymmetric = False # TODO: always using symmetric, as asymmetric not good
     if cali_table != None:
         cali_param = "--import-calibration-table=\"file={} asymmetric={}\"".format(
             cali_table, asymmetric)
@@ -110,7 +106,8 @@ def mlir_to_model(tpu_mlir: str,
                   quant_input: bool = False,
                   quant_output: bool = False,
                   disable_layer_group: bool = False,
-                  merge_weight: bool = False):
+                  merge_weight: bool = False,
+                  op_divide: bool = False):
     # generate final mlir
     strip_io_quant_param = '--strip-io-quant="quant_input={} quant_output={}"'.format(
         quant_input, quant_output)
@@ -122,6 +119,9 @@ def mlir_to_model(tpu_mlir: str,
     #address_assign_param = '--address-assign="reuse_addr=false"'
     if merge_weight:
         address_assign_param = '--address-assign="merge_weight=true weight_map_file=_weight_map.csv"'
+    op_divide_param = ""
+    if op_divide:
+        op_divide_param = "--op-divide"
     cmd = [
         "tpuc-opt",
         tpu_mlir,
@@ -129,6 +129,7 @@ def mlir_to_model(tpu_mlir: str,
         strip_io_quant_param,
         "--chip-tpu-optimize",
         "--weight-reorder",
+        op_divide_param,
         subnet_param,
         "--op-reorder",
         lg_param,
@@ -159,15 +160,8 @@ def mlir_to_model(tpu_mlir: str,
         pass
 
 
-def f32_blobs_compare(a_npz: str,
-                      b_npz: str,
-                      tolerance: str,
-                      excepts=None,
-                      show_detail=True,
-                      post_op=False):
+def f32_blobs_compare(a_npz: str, b_npz: str, tolerance: str, excepts=None, show_detail=True):
     cmd = ["npz_tool.py", "compare", a_npz, b_npz, "--tolerance", tolerance]
-    if post_op:
-        cmd.extend(["--post_op", post_op])
     if excepts:
         cmd.extend(["--except", excepts])
     if show_detail:

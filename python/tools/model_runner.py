@@ -68,7 +68,7 @@ def pack_bmodel_context_generator(model_file, net):
             o.data.tofile(f)
 
 
-def model_inference(inputs: dict, model_file: str) -> dict:
+def model_inference(inputs: dict, model_file: str, dump_all = True) -> dict:
     pyruntime = "pyruntime_"
     is_cv18xx = False
     if model_file.endswith(".bmodel"):
@@ -76,7 +76,7 @@ def model_inference(inputs: dict, model_file: str) -> dict:
         chip = get_chip_from_model(model_file)
         # trick for runtime link chip cmodel
         lib_so = 'libcmodel_1684x.so'
-        if chip == 'BM1686':
+        if chip == 'BM1686' or chip == 'CV186X':
             lib_so = 'libcmodel_1686.so'
         elif chip == 'BM1684':
             lib_so = 'libcmodel_1684.so'
@@ -90,10 +90,11 @@ def model_inference(inputs: dict, model_file: str) -> dict:
     pyruntime = importlib.import_module(pyruntime)
 
     outputs = dict()
-    model = pyruntime.Model(model_file)
     if not is_cv18xx:
+        model = pyruntime.Model(model_file)
         net = model.Net(model.networks[0])
     else:
+        model = pyruntime.Model(model_file, output_all_tensors = dump_all)
         net = model
     input_shapes = []
     only_one = len(inputs) == 1

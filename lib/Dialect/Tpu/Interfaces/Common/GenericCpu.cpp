@@ -126,11 +126,12 @@ LogicalResult tpu::GenericCpuOp::inference(InferenceParameter &p) {
         param.get("nms_threshold").cast<FloatAttr>().getValueAsDouble();
     yolo_param.obj_threshold =
         param.get("obj_threshold").cast<FloatAttr>().getValueAsDouble();
-    yolo_param.tiny = param.get("tiny").cast<BoolAttr>().getValue();
-    yolo_param.yolo_v4 = param.get("yolo_v4").cast<BoolAttr>().getValue();
-    yolo_param.spp_net = param.get("spp_net").cast<BoolAttr>().getValue();
-    yolo_param.anchors = param.get("anchors").cast<StringAttr>().getValue();
-
+    auto anchors = param.get("anchors").cast<StringAttr>().getValue().str();
+    std::istringstream iss(anchors);
+    std::string s;
+    while (std::getline(iss, s, ',')) {
+      yolo_param.anchors.push_back(atoi(s.c_str()));
+    }
     for (size_t i = 0; i < getInputs().size(); ++i) {
       tensor_list_t tensor_list;
       tensor_list.ptr = p.inputs[i];
@@ -314,6 +315,8 @@ LogicalResult tpu::GenericCpuOp::inference(InferenceParameter &p) {
     mlir::DictionaryAttr dic_param = this->getParam().value();
     int axis = dic_param.get("axis").cast<IntegerAttr>().getInt();
     int K = dic_param.get("K").cast<IntegerAttr>().getInt();
+    if (!module::isNone(getInputs()[1]))
+      K = (int)p.inputs[1][0];
     int is_sorted = dic_param.get("sorted").cast<IntegerAttr>().getInt();
     if (is_sorted == false) {
       llvm_unreachable("Not supported");
@@ -328,16 +331,16 @@ LogicalResult tpu::GenericCpuOp::inference(InferenceParameter &p) {
     for (int i = 0; i < axis; i++) {
       outer_dim *= input_shape[i];
     }
-#pragma omp parallel for schedule(static, omp_schedule(outer_dim))
+    #pragma omp parallel for schedule(static, omp_schedule(outer_dim))
     for (int i = 0; i < outer_dim; i++) {
       auto *ptr = p.inputs[0] + i * axis_dim;
       std::vector<std::pair<int, float>> result;
       topk_indices(result, ptr, axis_dim, K, is_largest);
       for (int k = 0; k < K; k++) {
-        auto indices_ptr = p.outputs[1] + i * K + k;
-        *indices_ptr = (float)result[k].first;
-        auto values_ptr = p.outputs[0] + i * K + k;
-        *values_ptr = result[k].second;
+          auto indices_ptr = p.outputs[1] + i * K + k;
+          *indices_ptr = (float)result[k].first;
+          auto values_ptr = p.outputs[0] + i * K + k;
+          *values_ptr = result[k].second;
       }
     }
   } else if (func_name == "gathernd_tf") {
@@ -382,8 +385,10 @@ LogicalResult tpu::GenericCpuOp::inference(InferenceParameter &p) {
     mlir::DictionaryAttr dic_param = this->getParam().value();
     GridSamplerParam param;
     param.mode = dic_param.get("mode").cast<IntegerAttr>().getInt();
-    param.padding_mode = dic_param.get("padding_mode").cast<IntegerAttr>().getInt();
-    param.align_corners = dic_param.get("align_corners").cast<BoolAttr>().getValue();
+    param.padding_mode =
+        dic_param.get("padding_mode").cast<IntegerAttr>().getInt();
+    param.align_corners =
+        dic_param.get("align_corners").cast<BoolAttr>().getValue();
     tensor_list_t input;
     tensor_list_t grid;
     input.ptr = p.inputs[0];

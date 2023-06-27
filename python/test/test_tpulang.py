@@ -49,7 +49,11 @@ class TPULANG_IR_TESTER(object):
             "HModel": (self.test_Model, N),
             "Mul": (self.test_Mul, Y),
             "Sub": (self.test_Sub, Y),
-            "Custom": (self.test_Custom, Y)
+            "Custom": (self.test_Custom, Y),
+            "MatMul": (self.test_MatMul, Y),
+            "Maxpool": (self.test_Maxpool, Y),
+            "Relu": (self.test_Relu, Y),
+            "Lenet": (self.test_Lenet, Y)
         }
         # no quantization when quant_mode == "f32"
         self.quant_modes = ["int8"]
@@ -239,6 +243,93 @@ class TPULANG_IR_TESTER(object):
         _test_model_def([1, 3, 28, 28])
 
     #######################################################################
+    # Convolution
+    # ------------
+    def conv_op(self,
+                x,
+                kshape,
+                stride,
+                pad=None,
+                group=1,
+                dilation=[1, 1],
+                zp=[None, None],
+                dtype="float32"):
+        oc = kshape[0]
+        weight = self.coeff_tensor(kshape, dtype)
+        out_dtype = dtype if dtype == 'float32' else 'int32'
+        bias = self.coeff_tensor(oc, out_dtype)
+        conv = tpul.conv_v2(x,
+                            weight,
+                            bias=bias,
+                            stride=stride,
+                            pad=pad,
+                            dilation=dilation,
+                            group=group,
+                            input_zp=zp[0],
+                            weight_zp=zp[1],
+                            out_dtype=out_dtype)
+        return conv
+
+    def test_Conv2d(self, case_name):
+        """Conv 2D"""
+
+        @tpulang
+        def _test_convolution(input_shape: List[int],
+                              kernel_shape: List[int],
+                              stride: List[int] = [1, 1],
+                              dilation: List[int] = [1, 1],
+                              pad: List[int] = None,
+                              group=1,
+                              dtype="float32",
+                              zp: List[int] = [None, None]):
+            x_data = rand_data(input_shape, dtype)
+            x = tpul.Tensor(dtype=dtype, shape=input_shape, data=x_data)
+            conv = self.conv_op(x,
+                                kernel_shape,
+                                stride,
+                                pad,
+                                group=group,
+                                dilation=dilation,
+                                zp=zp,
+                                dtype=dtype)
+            tpul.compile("{}_{}".format(case_name, TPULANG_IR_TESTER.ID), [x], [conv], False, 2)
+            TPULANG_IR_TESTER.ID += 1
+
+        _test_convolution([1, 3, 28, 28], [12, 3, 1, 1], group=3)
+        _test_convolution([1, 3, 32, 32], [12, 3, 3, 3], stride=[2, 2], pad=[1, 1, 1, 1])
+        _test_convolution([1, 3, 32, 32], [12, 3, 3, 3],
+                          stride=[2, 2],
+                          pad=[1, 1, 1, 1],
+                          dtype="int8",
+                          zp=[5, -8])
+
+    #######################################################################
+    # Lenet
+    # ------------
+    def test_Lenet(self, case_name):
+
+        def model_lenet(x):
+            conv0 = self.conv_op(x, kshape=[32, 1, 5, 5], stride=[1,1], pad=[2, 2, 2, 2], dtype='float32')
+            relu1 = self.relu_op(conv0)
+            maxpool2 = self.maxpool_op(relu1, kshape=[2, 2], stride=[2, 2], pad=[0, 0, 0, 0])
+            conv3 = self.conv_op(maxpool2, kshape=[64, 32, 5, 5], stride=[1,1], pad=[2, 2, 2, 2], dtype='float32')
+            relu4 =  self.relu_op(conv3)
+            maxpool5 =self.maxpool_op(relu4, kshape=[2, 2], stride=[2, 2], pad=[0, 0, 0, 0])
+            conv6 = self.conv_op(maxpool5, kshape=[1024, 64, 7, 7], stride=[1,1], dtype='float32')
+            relu7 =  self.relu_op(conv6)
+            conv9 = self.conv_op(relu7,  kshape=[10, 1024, 1, 1], stride=[1,1], dtype='float32')
+            return conv9
+
+        @tpulang
+        def _test_lenet(in_shape):
+            x_data = (rand_data(in_shape, 'float32') - 0.5) * 256
+            x = tpul.Tensor(dtype='float32', shape=in_shape, data=x_data)
+            out = model_lenet(x=x)
+            tpul.compile(case_name, [x], [out], False, 2)
+
+        _test_lenet([1, 1, 28, 28])
+
+    #######################################################################
     # Mul
     # ------------
     def mul_op(self, input_0, input_1, dtype="float32"):
@@ -318,37 +409,147 @@ class TPULANG_IR_TESTER(object):
         """Custom test sample"""
 
         @tpulang
-        def _test_swap_channel(input_shape: List[int], dtype="float32"):
+        def _test_base(op_name: str, input_shapes: list, params: dict, shape_func, infer_func,
+                       out_names, dtype: str):
+            input_data = []
+            inputs = []
+            for input_shape in input_shapes:
+                x_data = rand_data(input_shape, dtype)
+                input_data.append(x_data)
+                x = tpul.Tensor(dtype=dtype, shape=input_shape, data=x_data)
+                inputs.append(x)
 
-            def shape_func(tensors_in):
-                return [tensors_in[0].shape]
-
-            x_data = rand_data(input_shape, dtype)
-            x = tpul.Tensor(dtype=dtype, shape=input_shape, data=x_data)
-            out_names = ["out"]
-            params = {"order": [2, 1, 0]}
-            outs = self.custom_op([x],
+            outs = self.custom_op(inputs,
                                   shape_func,
-                                  "swapchannel",
+                                  op_name,
                                   params=params,
                                   dtypes=[dtype],
                                   out_names=out_names)
-            tpul.compile("{}_{}".format(case_name, TPULANG_IR_TESTER.ID), [x],
+            tpul.compile("{}_{}".format(case_name, TPULANG_IR_TESTER.ID),
+                         inputs,
                          outs,
                          False,
                          2,
                          has_custom=True)
             TPULANG_IR_TESTER.ID += 1
-
             # save the origin output for comparison
-            origin_out = x_data[:, [2, 1, 0], :, :]
             # There are two outputs because in non-f32 quant mode, the result will be
             # dequant back to f32 with castOp so that the final result will be named with the suffix '_f32'
-            out = {out_names[0]: origin_out, f"{out_names[0]}_f32": origin_out}
-            np.savez("target_data", **out)
+            if infer_func:
+                origin_out = infer_func(input_data)
+                out = {}
+                for out_name in out_names:
+                    out[out_name] = origin_out
+                    out[f"{out_name}_f32"] = origin_out
+                np.savez(f"{op_name}_target_data", **out)
 
-        _test_swap_channel([1, 3, 14, 14])
+        def _test_swap_channel(input_shapes: list, dtype="float32"):
 
+            def shape_func(tensors_in):
+                return [tensors_in[0].shape]
+
+            def infer_func(np_data):
+                return [np_data[0][:, [2, 1, 0], :, :]]
+
+            params = {"order": [2, 1, 0]}
+            _test_base("swapchannel", input_shapes, params, shape_func, infer_func, ["out"], dtype)
+
+        def _test_abs_add(input_shapes: list, dtype="float32"):
+
+            def shape_func(tensors_in):
+                return [tensors_in[0].shape]
+
+            def infer_func(np_data):
+                return [np.abs(np_data[0]) + 1.2]
+
+            params = {"b_val": 1.2}
+            _test_base("absadd", input_shapes, params, shape_func, infer_func, ["out"], dtype)
+
+        def _test_ceil_add(input_shapes: list, dtype="float32"):
+
+            def shape_func(tensors_in):
+                return [tensors_in[0].shape]
+
+            def infer_func(np_data):
+                return [np.ceil(np_data[0]) + 1.5]
+
+            params = {"b_val": 1.5}
+            _test_base("ceiladd", input_shapes, params, shape_func, infer_func, ["out"], dtype)
+
+        _test_swap_channel([[1, 3, 14, 14]])
+        _test_abs_add([[1, 3, 14, 14]])
+        _test_ceil_add([[1, 3, 14, 14]])
+
+    #######################################################################
+    # Matmul
+    # ------------
+    def matmul_op(self, left, right, dtype="float32"):
+        matmul = tpul.matmul(left, right)
+        return matmul
+
+    def test_MatMul(self, case_name):
+        """Matmul"""
+
+        @tpulang
+        def _test_matmul(shape_x: List[int], shape_y: List[int], dtype="float32"):
+            left = rand_data(shape_x, dtype)
+            right = rand_data(shape_y, dtype)
+            x = tpul.Tensor(dtype=dtype, shape=shape_x, data=left)
+            y = tpul.Tensor(dtype=dtype, shape=shape_y, data=right)
+            matmul = self.matmul_op(x, y, dtype=dtype)
+            tpul.compile("{}_{}".format(case_name, TPULANG_IR_TESTER.ID), [x], [matmul], False, 2)
+            TPULANG_IR_TESTER.ID += 1
+
+        _test_matmul([1, 3, 28, 10], [1, 3, 10, 8])
+
+    #######################################################################
+    # Maxpool
+    # ------------
+    def maxpool_op(self,
+                input_0,
+                kshape,
+                stride,
+                pad=None,
+                ceil_mode=False):
+        maxpool = tpul.maxpool(input_0, kshape, stride, pad, ceil_mode)
+        return maxpool
+
+    def test_Maxpool(self, case_name):
+        """Maxpool"""
+
+        @tpulang
+        def _test_maxpool(shape_x: List[int],
+                                kshape: List[int] = [1,1],
+                                stride: List[int] = [1, 1],
+                                pad: List[int] = None,
+                                dtype="float32"):
+            input = rand_data(shape_x, dtype)
+            x = tpul.Tensor(dtype=dtype, shape=shape_x, data=input)
+            maxpool = self.maxpool_op(x, kshape, stride, pad)
+            tpul.compile("{}_{}".format(case_name, TPULANG_IR_TESTER.ID), [x], [maxpool], False, 2)
+            TPULANG_IR_TESTER.ID += 1
+
+        _test_maxpool([1, 32, 28, 28], kshape = [2, 2], stride = [2, 2], pad=[0, 0, 0, 0])
+
+    #######################################################################
+    # Relu
+    # ------------
+    def relu_op(self, input_0):
+        relu = tpul.relu(input_0)
+        return relu
+
+    def test_Relu(self, case_name):
+        """Relu"""
+
+        @tpulang
+        def _test_relu(shape_x: List[int], dtype="float32"):
+            input = rand_data(shape_x, dtype)
+            x = tpul.Tensor(dtype=dtype, shape=shape_x, data=input)
+            relu = self.relu_op(x)
+            tpul.compile("{}_{}".format(case_name, TPULANG_IR_TESTER.ID), [x], [relu], False, 2)
+            TPULANG_IR_TESTER.ID += 1
+
+        _test_relu([1, 32, 28, 28])
 
 def test_one_case_in_all(tester: TPULANG_IR_TESTER, case, error_cases, success_cases):
     import traceback
@@ -363,6 +564,7 @@ def test_one_case_in_all(tester: TPULANG_IR_TESTER, case, error_cases, success_c
 
 def test_all(tester: TPULANG_IR_TESTER):
     import multiprocessing
+    from utils.misc import collect_process
     process_number = multiprocessing.cpu_count() // 2 + 1
     processes = []
     error_cases = multiprocessing.Manager().list()
@@ -370,26 +572,14 @@ def test_all(tester: TPULANG_IR_TESTER):
     for case in tester.test_function:
         if tester.check_support(case):
             p = multiprocessing.Process(target=test_one_case_in_all,
+                                        name=case,
                                         args=(tester, case, error_cases, success_cases))
-            p.name = case
             processes.append(p)
         if len(processes) == process_number:
-            for p in processes:
-                p.start()
-            for j in processes:
-                j.join()
-            for p in processes:
-                if p.exitcode:
-                    error_cases.append(p.name)
+            collect_process(processes, error_cases)
             processes = []
-    if processes:
-        for p in processes:
-            p.start()
-        for j in processes:
-            j.join()
-        for p in processes:
-            if p.exitcode:
-                error_cases.append(p.name)
+    collect_process(processes, error_cases)
+    processes = []
     # error_cases = []
     # success_cases = []
     # for case in tester.test_cases:

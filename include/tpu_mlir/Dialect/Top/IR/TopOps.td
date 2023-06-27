@@ -67,6 +67,8 @@ def DetectionOutputCodeTypeAttr: AnyStrAttrOf<["CORNER", "CENTER_SIZE", "CORNER_
 def RoiAlignModeAttr: AnyStrAttrOf<["Avg","Max"]>;
 def NonZeroOrderAttr: AnyStrAttrOf<["ColMajor","RowMajor"]>;
 def StoreModeAttr: AnyStrAttrOf<["1N", "2N", "4N"]>;
+def YoloVersionAttr: AnyStrAttrOf<["yolov3", "yolov3_tiny", "yolov3_spp", "yolov4", "yolov5"]>;
+def MatchTemplateModeAttr: AnyStrAttrOf<["TM_CCOEFF_NORMED", "TM_SQDIFF"]>;
 
 //===----------------------------------------------------------------------===//
 // TOP Types.
@@ -141,6 +143,7 @@ def Top_InputOp: Top_BaseOp<"Input"> {
     OptionalAttr<ChannelFormatAttr>:$channel_format,
     OptionalAttr<I64ArrayAttr>:$resize_dims,
     OptionalAttr<BoolAttr>:$keep_aspect_ratio,
+    OptionalAttr<StrAttr>:$keep_ratio_mode,
     OptionalAttr<I64Attr>:$pad_value,
     OptionalAttr<PadModeAttr>:$pad_type,
     OptionalAttr<F64ArrayAttr>:$scale,
@@ -282,7 +285,8 @@ def Top_UnpackOp: Top_Op<"Unpack"> {
   let hasCanonicalizer = 1;
 }
 
-def Top_ConvOp: Top_Op<"Conv", [SupportFuseRelu]> {
+def Top_ConvOp: Top_Op<"Conv", [SupportFuseRelu,
+  DeclareOpInterfaceMethods<InferenceInterface,["backward_weight"]>]> {
   let summary = "Convolution operator";
 
   let description = [{
@@ -718,11 +722,13 @@ def Top_AttentionOp: Top_Op<"Attention"> {
     AnyTensorOrNone:$musk,
     F64Attr:$scale,
     I64Attr:$head,
+    DefaultValuedAttr<I64Attr, "0">:$dim,
+    DefaultValuedAttr<F64ArrayAttr, "{1.0}">:$scale_param,
+    DefaultValuedAttr<I64ArrayAttr, "{0}">:$zp_param,
     DefaultValuedAttr<I64Attr, "0">:$has_bias
   );
 
   let results = (outs AnyTensor:$output);
-  let hasCanonicalizer = 1;
 }
 
 def Top_PadOp:Top_Op<"Pad"> {
@@ -1097,6 +1103,7 @@ def Top_TopKOp:Top_Op<"TopK"> {
   }];
   let arguments = (ins
     AnyTensor:$input,
+    AnyTensorOrNone:$K_tensor,
     I64Attr:$axis,
     I64Attr:$K,
     DefaultValuedAttr<BoolAttr, "true">:$largest,
@@ -1497,6 +1504,22 @@ def Top_NmsOp : Top_Op<"Nms"> {
   let results = (outs AnyTensor:$output);
 }
 
+def Top_MatchTemplateOp: Top_Op<"MatchTemplate"> {
+  let summary = "opencv MatchTemplate operator";
+
+  let description = [{
+    Perform opencv MatchTemplate operation.
+  }];
+
+  let arguments = (ins
+    AnyTensor:$input,
+    AnyTensor:$match,
+    MatchTemplateModeAttr:$mode
+  );
+
+  let results = (outs AnyTensor:$output);
+}
+
 def Top_GatherOp: Top_Op<"Gather"> {
   let summary = "Gather operator";
   let description = [{
@@ -1694,6 +1717,19 @@ def Top_PowOp : Top_Op<"Pow"> {
   let hasCanonicalizer = 1;
 }
 
+def Top_Pow2Op : Top_Op<"Pow2"> {
+  let summary = "Pow2 operation";
+  let description = [{
+    output = n ^ input
+  }];
+  let arguments = (ins
+    F64Attr: $const_val,
+    AnyTensor:$input
+  );
+  let results = (outs AnyTensor:$output);
+  //let hasCanonicalizer = 1;
+}
+
 def Top_SqrtOp : Top_Op<"Sqrt"> {
   let summary = "Sqrt operation";
   let description = [{
@@ -1859,16 +1895,11 @@ def Top_YoloDetectionOp : Top_Op<"YoloDetection"> {
     F64Attr:$nms_threshold,
     F64Attr:$obj_threshold,
     I64Attr:$keep_topk,
-    DefaultValuedAttr<BoolAttr, "false">:$spp_net,
-    DefaultValuedAttr<BoolAttr, "false">:$tiny,
-    DefaultValuedAttr<BoolAttr, "false">:$yolo_v4,
+    I64ArrayAttr:$anchors,
+    YoloVersionAttr:$version,
     DefaultValuedAttr<I64Attr, "80">:$class_num,
-    DefaultValuedAttr<StrAttr, "">:$anchors,
-    DefaultValuedAttr<I64Attr, "0">:$flag,
     DefaultValuedAttr<I64Attr, "3">:$num_boxes,
-    DefaultValuedAttr<I64Attr, "3">:$mask_group_size,
-    DefaultValuedAttr<ConfinedAttr<I64ArrayAttr, [ArrayCount<3>]>, "{0,0,0}">:$scale,
-    DefaultValuedAttr<ConfinedAttr<I64ArrayAttr, [ArrayCount<9>]>, "{0,0,0,0,0,0,0,0,0}">:$mask
+    DefaultValuedAttr<BoolAttr, "false">:$agnostic_nms
   );
 
   let results = (outs AnyTensor:$output);
@@ -1904,9 +1935,7 @@ def Top_LayerNormOp : Top_Op<"LayerNorm"> {
     F64Attr:$eps
   );
   let results = (outs
-    AnyTensor:$output,
-    AnyTensorOrNone:$mean,
-    AnyTensorOrNone:$rstd
+    AnyTensor:$output
   );
   let hasCanonicalizer = 1;
 }

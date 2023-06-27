@@ -84,6 +84,7 @@ typedef struct ir_layer_info {
     fw_batchnorm_layer_param_t fw_batchnorm_layer_param;
     fw_reshape_layer_param_t fw_reshape_layer_param;
     fw_deconv_layer_param_t fw_deconv_layer_param;
+    fw_deconv3d_layer_param_t fw_deconv3d_layer_param;
     fw_crop_layer_param_t fw_crop_layer_param;
     fw_concat_loc_layer_param_t fw_concat_loc_layer_param;
     fw_mulshift_layer_param_t fw_mulshift_layer_param;
@@ -141,6 +142,8 @@ typedef struct ir_layer_info {
     fw_priorbox_layer_param_t fw_priorbox_layer_param;
     fw_yolo_layer_param_t fw_yolo_layer_param;
     fw_yolov3_detect_out_layer_param_t fw_yolov3_detect_out_layer_param;
+    fw_yolov5_detect_out_layer_param_t fw_yolov5_detect_out_layer_param;
+    fw_yolov5_decode_detect_out_layer_param_t fw_yolov5_detect_decode_out_layer_param;
     fw_reorg_layer_param_t fw_reorg_layer_param;
     fw_ssd_detect_out_layer_param_t fw_ssd_detect_out_layer_param;
     fw_tensorarray_layer_param_t fw_tensorarray_layer_param;

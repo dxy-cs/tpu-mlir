@@ -47,9 +47,14 @@ typedef std::map<std::string, std::vector<int64_t>> shape_map_t;
 namespace py = pybind11;
 
 // Warning: buffer in C++. New inference will erase old output
-static py::array getPyArray(float *ptr, const std::vector<int64_t> &shape) {
-  py::capsule do_nothing((void *)ptr, [](void *f) {});
-  return py::array_t<float>(shape, ptr, do_nothing);
+static py::array getPyArray(std::shared_ptr<std::vector<float>> ptr,
+                            const std::vector<int64_t> &shape) {
+  auto shared_ptr_ptr = new std::shared_ptr<std::vector<float>>(std::move(ptr));
+  py::capsule delete_shared_ptr_ptr(shared_ptr_ptr, [](void *ptr) {
+    delete reinterpret_cast<std::shared_ptr<std::vector<float>> *>(ptr);
+  });
+  return py::array_t<float>(shape, (*shared_ptr_ptr)->data(),
+                            delete_shared_ptr_ptr);
 }
 
 struct quant_brief_info {
@@ -101,7 +106,6 @@ public:
     for (auto &name : interpreter_->all_weight_names) {
       all_weight_names.append(name);
     }
-
   }
 
   py::dict getAllTensor() {
@@ -110,7 +114,7 @@ public:
       auto tensor = interpreter_->getTensor(name);
       auto shape = interpreter_->getTensorShape(name);
       py::str py_s(name);
-      py_ret[py_s] = getPyArray(tensor->data(), shape);
+      py_ret[py_s] = getPyArray(std::move(tensor), shape);
     }
     return py_ret;
   }
@@ -129,16 +133,18 @@ public:
                             true);
   }
 
+  // Warning: using copy in python
   py::array get_tensor(std::string name) {
     auto tensor = interpreter_->getTensor(name);
     auto shape = interpreter_->getTensorShape(name);
-    return getPyArray(tensor->data(), shape);
+    return getPyArray(std::move(tensor), shape);
   }
 
+  // Tip: not using copy in python, since independent mem
   py::array get_fp32_tensor(std::string name) {
     auto tensor = interpreter_->getTensor(name, true);
     auto shape = interpreter_->getTensorShape(name);
-    return getPyArray(tensor->data(), shape);
+    return getPyArray(std::move(tensor), shape);
   }
 
   struct quant_brief_info format_tensor_qinfo(std::string name) {
@@ -168,7 +174,22 @@ public:
   py::array invoke_at(const std::string name) {
     auto tensor = interpreter_->invoke_at(name);
     auto shape = interpreter_->getTensorShape(name);
-    return getPyArray(tensor->data(), shape);
+    return getPyArray(std::move(tensor), shape);
+  }
+
+  py::array backward_weight_at(
+      const std::string name, const std::string weight_name,
+      py::array_t<float, py::array::c_style | py::array::forcecast> grd_dst) {
+    auto shape = interpreter_->getTensorShape(weight_name);
+    size_t size = 1;
+    for (auto dim : shape) {
+      size *= dim;
+    }
+    py::array_t<float, py::array::c_style | py::array::forcecast> weight_grd(
+        shape);
+    interpreter_->backward_weight_at(name, grd_dst.data(), grd_dst.size(),
+                                     weight_grd.data(), size);
+    return weight_grd;
   }
 
   void invoke_from(const std::string name) { interpreter_->invoke_from(name); }
@@ -191,6 +212,7 @@ void debug_only(std::vector<std::string> debug_types) {
   llvm::DebugFlag = true;
   std::vector<const char *> c_debug;
   c_debug.reserve(debug_types.size());
+
   for (auto &d : debug_types)
     c_debug.push_back(const_cast<char *>(d.c_str()));
   llvm::setCurrentDebugTypes(c_debug.data(), c_debug.size());
@@ -229,6 +251,7 @@ PYBIND11_MODULE(pymlir, m) {
       .def("invoke", &py_module::invoke)
       .def("fake_quant_weight", &py_module::fake_quant_weight)
       .def("invoke_at", &py_module::invoke_at, "invote at specified layer")
+      .def("backward_weight_at", &py_module::backward_weight_at, "invoke the backward weight function of conv op")
       .def("invoke_from", &py_module::invoke_from, "invote from specified layer to the end")
       .def("get_tensor_qinfo", &py_module::format_tensor_qinfo, "get simple quant info of tensor")
       .def_readonly("input_names", &py_module::input_names)

@@ -73,6 +73,8 @@ void tpu::LoadOp::codegen_local_bm1684x(int64_t n_step, int64_t c_step,
   gdma_format = BM168x::getGdmaFormat(data_type);
   auto fmt_bytes = BM168x::getFmtBytes(data_type);
   auto g_addr = module::getAddress(getInput());
+  // int64_t dhw = D * H * W;
+  // int64_t eu_num = BM168x::eu_num(fmt_bytes);
   int64_t use_3ic = getUse_3icOptimize();
   if (use_3ic < 4 && use_3ic > 0) {
     auto g_stride = BM168x::getGlobalStride(N, C, H, W);

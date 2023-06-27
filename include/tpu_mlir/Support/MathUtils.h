@@ -67,8 +67,9 @@ int omp_schedule(int count);
 void function_relu(float *src, float *dst, int64_t size, float relu_limit = 0.f,
                    mlir::Type elem_type = nullptr);
 
-void topk_indices(std::vector<std::pair<int, float>> &result,
-                  const float *items, int num_elem, int k, bool largest);
+template <typename T>
+void topk_indices(std::vector<std::pair<int, T>> &result, const T *items,
+                  int num_elem, int k, bool largest);
 // =======================
 // interfece for quantization
 // =======================
@@ -198,9 +199,10 @@ bool permute_reset(const std::vector<int64_t> &shape,
                    const std::vector<int64_t> &order,
                    std::vector<int64_t> &to_shape,
                    std::vector<int64_t> &to_order, int to_dim);
+
 template <typename T>
-void function_permute(T *from, T *to, const std::vector<int64_t> &shape_5,
-                      const std::vector<int64_t> &order_5);
+void function_permute(T *from, T *to, const std::vector<int64_t> &shape,
+                      const std::vector<int64_t> &order);
 
 // compare
 bool compare(float lhs, float rhs, llvm::StringRef mode);
@@ -267,6 +269,20 @@ saturate(T v, mlir::Type type,
 }
 
 template <typename T>
+int16_t to_int16(T value,
+               RoundingMode round_mode = ROUNDING_HALF_AWAY_FROM_ZERO) {
+  auto v = to_int(value, round_mode);
+  return v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+};
+
+template <typename T>
+uint16_t to_uint16(T value,
+                 RoundingMode round_mode = ROUNDING_HALF_AWAY_FROM_ZERO) {
+  auto v = to_int(value, round_mode);
+  return v > 65535 ? 65535 : v < 0 ? 0 : v;
+}
+
+template <typename T>
 int8_t to_int8(T value,
                RoundingMode round_mode = ROUNDING_HALF_AWAY_FROM_ZERO) {
   auto v = to_int(value, round_mode);
@@ -293,6 +309,12 @@ uint8_t to_uint4(T value,
   auto v = to_int(value, round_mode);
   return v > 15 ? 15 : v < 0 ? 0 : v;
 }
+
+// convert all data to int8 by scale
+bool is_all_int8(const std::vector<float> &data, float scale = 1.0,
+                 bool sign = true);
+bool to_all_int8(const std::vector<float> &data, float &scale,
+                 bool sign = true);
 
 void swap_dim_data(float *input, float *output, std::vector<int64_t> &ishape,
                    std::vector<int64_t> &offsets);

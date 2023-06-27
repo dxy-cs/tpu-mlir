@@ -26,18 +26,29 @@ class ModelTransformer(object):
     def __init__(self, model_name, model_def):
         self.model_name = model_name
         self.model_def = model_def
-        self.converter = BaseConverter()
         self.do_mlir_infer = True
+        self.converter = BaseConverter()
 
     def cleanup(self):
         file_clean()
 
-    def model_transform(self, mlir_file: str, post_handle_type=""):
+    @staticmethod
+    def ensure_batch_size(arr: np.ndarray, batch_size):
+        """arr: [old_batch_size, ...]"""
+        old_batch_size = arr.shape[0]
+        if old_batch_size > 1:
+            return arr
+        repeat_factor = int(np.ceil(batch_size / old_batch_size))
+        repeated_arr = np.repeat(arr, repeat_factor, axis=0)
+        trimmed_arr = repeated_arr[:batch_size]
+        return trimmed_arr
+
+    def model_transform(self, mlir_file: str, add_postprocess=""):
         self.mlir_file = mlir_file
         mlir_origin = mlir_file.replace('.mlir', '_origin.mlir', 1)
         file_mark(mlir_origin)
         self.converter.generate_mlir(mlir_origin)
-        mlir_opt_for_top(mlir_origin, self.mlir_file, post_handle_type)
+        mlir_opt_for_top(mlir_origin, self.mlir_file, add_postprocess)
         print("Mlir file generated:{}".format(mlir_file))
 
         self.module_parsered = MlirParser(self.mlir_file)
@@ -54,11 +65,14 @@ class ModelTransformer(object):
             if only_one:
                 assert (len(self.converter.input_names) == 1)
                 name = self.converter.input_names[0]
-                inputs[name] = npz_in[npz_in.files[0]]
+                # for GRU, batch_second, ensure_batch_size will have no effects.
+                batch_size = self.module_parsered.get_batch_size()
+                inputs[name] = self.ensure_batch_size(npz_in[npz_in.files[0]], batch_size)
             else:
                 for name in self.converter.input_names:
                     assert (name in npz_in.files)
-                    inputs[name] = npz_in[name]
+                    batch_size = self.converter.getShape(name)[0]
+                    inputs[name] = self.ensure_batch_size(npz_in[name], batch_size)
         elif file_list[0].endswith(('.jpg', '.jpeg', '.png')):  #todo add isPicture in util
             ppa = preprocess()
             for i in range(self.input_num):
@@ -234,8 +248,8 @@ if __name__ == '__main__':
     parser.add_argument("--tolerance", default='0.99,0.99',
                         help="minimum similarity tolerance to model transform")
     parser.add_argument("--excepts", default='-', help="excepts")
-    parser.add_argument("--post_handle_type", default="", type=str.lower,
-                        choices=['','yolo', 'ssd'], help="post handle type, such as yolo,ssd etc")
+    parser.add_argument("--add_postprocess", default="", type=str.lower,
+                        choices=['','yolov3','yolov5','ssd'], help="add postprocess for model")
     parser.add_argument("--debug", action='store_true', help='to keep all intermediate files for debug')
     parser.add_argument("--mlir", type=str, required=True, help="output mlir model file")
     # yapf: enable
@@ -244,7 +258,7 @@ if __name__ == '__main__':
     if unknown_args:
         args.unknown_params += unknown_args
     tool = get_model_transform(args)
-    tool.model_transform(args.mlir, args.post_handle_type)
+    tool.model_transform(args.mlir, args.add_postprocess)
     if args.test_input:
         assert (args.test_result)
         tool.model_validate(args.test_input, args.tolerance, args.excepts, args.test_result)

@@ -85,6 +85,8 @@ int64_t getFLOPs();
 void setFLOPs(int64_t flops);
 bool isAsymmetric();
 void setAsymmetric(bool is_asymmetric);
+llvm::StringRef getPostprocess();
+void setPostprocess(StringRef post);
 
 //-----------------------------------------------------------------
 // Helper Functions for ModuleOp
@@ -132,6 +134,7 @@ bool isUnranked(Value v);
 void setShapeOrVerify(Value v, llvm::ArrayRef<int64_t> shape);
 bool isSign(Value v);
 bool isWeight(Value v);
+bool isShapeRelatedOp(Value v);
 bool isAllWeight(Operation *op);
 bool isNone(Value v);
 bool isGlobalBuffer(Value v);

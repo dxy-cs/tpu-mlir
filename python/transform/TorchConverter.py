@@ -93,6 +93,7 @@ class TorchConverter(BaseConverter):
             "aten::elu": lambda node: self.convert_elu_op(node),
             "aten::embedding": lambda node: self.convert_embedding_op(node),
             "aten::exp": lambda node: self.convert_math_op(node, "exp"),
+            "aten::expand": lambda node: self.convert_expand_op(node),
             "aten::eq": lambda node: self.convert_compare_op(node, "Equal"),
             "aten::floor": lambda node: self.convert_floor_op(node),
             "aten::floor_divide": lambda node: self.convert_floor_divide_op(node),
@@ -119,6 +120,7 @@ class TorchConverter(BaseConverter):
             "aten::log_softmax": lambda node: self.convert_softmax_op(node, log=True),
             "aten::lstm": lambda node: self.convert_lstm_op(node),
             "aten::lt": lambda node: self.convert_compare_op(node, "Less"),
+            "aten::masked_fill": lambda node: self.convert_masked_fill(node),
             "aten::matmul": lambda node: self.convert_matmul_op(node),
             "aten::max": lambda node: self.convert_max_op(node),
             "aten::max_pool1d": lambda node: self.convert_maxpool_op(node),
@@ -126,6 +128,7 @@ class TorchConverter(BaseConverter):
             "aten::max_pool3d": lambda node: self.convert_maxpool_op(node),
             "aten::mean": lambda node: self.convert_reduce_op(node, method="ReduceMean"),
             "aten::meshgrid": lambda node: self.convert_mesh_grid_op(node),
+            "aten::min": lambda node: self.convert_min_op(node),
             "aten::mish": lambda node: self.convert_mish_op(node),
             "aten::mm": lambda node: self.convert_matmul_op(node),
             "aten::mul": lambda node: self.convert_mul_op(node),
@@ -134,7 +137,7 @@ class TorchConverter(BaseConverter):
             "aten::new_ones": lambda node: self.convert_new_constant_fill_op(node, 1),
             "aten::new_zeros": lambda node: self.convert_new_constant_fill_op(node, 0),
             "aten::ones": lambda node: self.convert_constant_fill_op(node, 1),
-            "aten::expand": lambda node: self.convert_expand_op(node),
+            "aten::ones_like": lambda node: self.convert_constant_like_op(node, 1),
             "aten::pad": lambda node: self.convert_pad_op(node, mode='unknown'),
             "aten::pow": lambda node: self.convert_pow_op(node),
             "aten::prelu": lambda node: self.convert_prelu_op(node),
@@ -179,8 +182,10 @@ class TorchConverter(BaseConverter):
             "aten::view": lambda node: self.convert_reshape_op(node),
             "aten::where": lambda node: self.convert_where_op(node),
             "aten::zeros": lambda node: self.convert_constant_fill_op(node, 0),
+            "aten::zeros_like": lambda node: self.convert_constant_like_op(node, 0),
             ###### prim #####
             "prim::Constant": lambda node: self.convert_constant(node),
+            "prim::DictConstruct": lambda node: self.convert_dict_construct(node),
             "prim::GetAttr": lambda node: self.convert_get_attr(node),
             "prim::ListConstruct": lambda node: self.convert_list_construct(node),
             "prim::ListUnpack": lambda node: self.convert_list_unpack(node),
@@ -259,6 +264,13 @@ class TorchConverter(BaseConverter):
                    outp.node().kind() == 'prim::ListConstruct':
                     ins = outp.node().inputs()
                     self.output_names.extend([i.debugName() for i in ins])
+                elif outp.node().kind() == 'prim::DictConstruct':
+                    ins = outp.node().inputs()
+                    ls_ins = list(ins)
+                    in_num = len(ls_ins)
+                    assert in_num % 2 == 0
+                    self.output_names.extend(
+                        [ls_ins[i*2+1].debugName() for i in range(int(in_num/2))])
                 else:
                     self.output_names.append(outp.debugName())
         self.weight_names = []
@@ -510,6 +522,30 @@ class TorchConverter(BaseConverter):
                                ip=self.mlir.insert_point).output
         self.addOperand(torch_node.name, new_op)
 
+    def convert_min_op(self, torch_node: TorchNode):
+        op = self.getOperand(torch_node.inputs[0])
+        dim = self.const_val[torch_node.inputs[1]]
+        keepdims = self.const_val[torch_node.inputs[2]]
+        select_last_index = True
+        out_needs = [False, False]
+        for idx, out in enumerate(torch_node.outputs):
+            if len(out) > 0 and self.check_need(out):
+                out_needs[idx] = True
+        new_op = top.ArgOp(self.unranked_type,
+                           self.unranked_type,
+                           op,
+                           axis=dim,
+                           keepdims=keepdims,
+                           mode=StringAttr.get("ArgMin"),
+                           select_last_index=select_last_index,
+                           loc=self.get_loc(torch_node.outputs),
+                           ip=self.mlir.insert_point)
+        out_ops = [new_op.values, new_op.indices]
+        print(out_needs)
+        for idx, need in enumerate(out_needs):
+            if not need: continue
+            self.addOperand(torch_node.outputs[idx], out_ops[idx])
+
     def _mul_scale(self, in_name, scale):
         in_op = self.getOp(in_name)
         op_name = in_name + "_ml_mulscale"
@@ -630,6 +666,21 @@ class TorchConverter(BaseConverter):
         op0 = self.getOp(torch_node.inputs[0])
         new_op = top.ConstantFillOp(self.unranked_type,
                                     op0,
+                                    value=value,
+                                    loc=self.get_loc(torch_node.name),
+                                    ip=self.mlir.insert_point).output
+        self.addOperand(torch_node.name, new_op)
+
+    def convert_constant_like_op(self, torch_node: TorchNode, value):
+        op0 = self.getOp(torch_node.inputs[0])
+        size_op = top.SizeOp(self.unranked_type,
+                            op0,
+                            axis=None,
+                            loc=self.get_loc(torch_node.inputs[0] + "_size"),
+                            ip=self.mlir.insert_point).output
+        self.addOperand(torch_node.inputs[0] + "_size", size_op)
+        new_op = top.ConstantFillOp(self.unranked_type,
+                                    size_op,
                                     value=value,
                                     loc=self.get_loc(torch_node.name),
                                     ip=self.mlir.insert_point).output
@@ -1190,8 +1241,6 @@ class TorchConverter(BaseConverter):
             bias_opd = self.getWeightOp(torch_node.inputs[3])
         eps = self.const_val[torch_node.inputs[4]]
         out = top.LayerNormOp(self.unranked_type,
-                              self.unranked_type,
-                              self.unranked_type,
                               op0,
                               scale_opd,
                               bias_opd,
@@ -1238,20 +1287,16 @@ class TorchConverter(BaseConverter):
         self.tensor_list[torch_node.outputs[0]] = tensors
 
     def convert_clamp_op(self, torch_node: TorchNode):
-        op0 = self.getOp(torch_node.inputs[0])
+        op = self.getOp(torch_node.inputs[0])
         min_val = self.const_val[torch_node.inputs[1]]
         max_val = self.const_val[torch_node.inputs[2]]
-        min_op = top.MinConstOp(self.unranked_type,
-                                op0,
-                                const_val=max_val,
-                                loc=self.get_loc(torch_node.name + "_min"),
-                                ip=self.mlir.insert_point).output
-        max_op = top.MaxConstOp(self.unranked_type,
-                                min_op,
-                                const_val=min_val,
-                                loc=self.get_loc(torch_node.name),
-                                ip=self.mlir.insert_point).output
-        self.addOperand(torch_node.name, max_op)
+        new_op = top.ClipOp(self.unranked_type,
+                            op,
+                            loc=self.get_loc(torch_node.name),
+                            min=min_val,
+                            max=max_val,
+                            ip=self.mlir.insert_point).output
+        self.addOperand(torch_node.name, new_op)
 
     def convert_relu_op(self, torch_node: TorchNode):
         op = self.getOp(torch_node.inputs[0])
@@ -1362,6 +1407,19 @@ class TorchConverter(BaseConverter):
                             op,
                             loc=self.get_loc(torch_node.name),
                             ip=self.mlir.insert_point).output
+        self.addOperand(torch_node.name, new_op)
+
+    def convert_masked_fill(self, torch_node: TorchNode):
+        x = self.getOp(torch_node.inputs[0])
+        mask = self.getOp(torch_node.inputs[1])
+        const_val = self.const_val[torch_node.inputs[2]]
+        new_op = top.MaskedFillOp(self.unranked_type,
+                                  mask,
+                                  x,
+                                  inversed=True,
+                                  const_val=const_val,
+                                  loc=self.get_loc(torch_node.name),
+                                  ip=self.mlir.insert_point).output
         self.addOperand(torch_node.name, new_op)
 
     def convert_matmul_op(self, torch_node: TorchNode):
@@ -1685,7 +1743,7 @@ class TorchConverter(BaseConverter):
         n_offset_grps = self.const_val[torch_node.inputs[12]]
         use_mask = self.const_val[torch_node.inputs[13]]
         if (use_mask == 0):
-            mask_op = self.mlir.none_op;
+            mask_op = self.mlir.none_op
         new_op = top.DeformConv2DOp(self.unranked_type,
                             op,
                             weight_op,
@@ -1702,3 +1760,6 @@ class TorchConverter(BaseConverter):
                             loc=self.get_loc(torch_node.name),
                             ip=self.mlir.insert_point).output
         self.addOperand(torch_node.name, new_op)
+
+    def convert_dict_construct(self, torch_node: TorchNode):
+        pass

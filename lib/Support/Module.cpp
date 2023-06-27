@@ -37,6 +37,7 @@ struct Attr {
   static constexpr llvm::StringRef ASYMMETRIC = "module.asymmetric";
   static constexpr llvm::StringRef MODE = "module.mode";
   static constexpr llvm::StringRef PLATFORM = "module.platform";
+  static constexpr llvm::StringRef POSTPROCESS = "module.postprocess";
 };
 
 static ModuleOp m = nullptr;
@@ -94,13 +95,13 @@ Value getOriValue(Value v) {
       // pre call op
       auto operand = call_op.getOperand(idx);
       if (operand.isa<BlockArgument>()) {
-        auto find_root = [](auto&&Me, Value v) ->Value {
+        auto find_root = [](auto &&Me, Value v) -> Value {
           if (v.isa<BlockArgument>()) {
-              int index = dyn_cast<BlockArgument>(v).getArgNumber();
-              auto p_op = v.getParentBlock()->getParentOp();
-              auto func_op = dyn_cast<FuncOp>(p_op);
-              auto call_op = getCallOp(func_op);
-              return Me(Me, call_op.getOperand(index));
+            int index = dyn_cast<BlockArgument>(v).getArgNumber();
+            auto p_op = v.getParentBlock()->getParentOp();
+            auto func_op = dyn_cast<FuncOp>(p_op);
+            auto call_op = getCallOp(func_op);
+            return Me(Me, call_op.getOperand(index));
           } else {
             return v;
           }
@@ -218,7 +219,7 @@ void updateModuleTypes() {
 void removeUnusedOp() {
   std::vector<Operation *> all_ops;
   for (auto func : m.getOps<FuncOp>()) {
-    //for to support nested region's op
+    // for to support nested region's op
     func.walk<WalkOrder::PreOrder>([&](Operation *op) {
       if (!isa<ReturnOp, FuncOp, tpu::YieldOp, top::YieldOp>(op))
         all_ops.push_back(op);
@@ -292,8 +293,12 @@ llvm::ArrayRef<int64_t> getShape(Value v) {
     v.dump();
     llvm_unreachable("v is none type");
   }
-  auto type = v.getType().cast<RankedTensorType>();
-  return type.getShape();
+  if (!isUnranked(v)) {
+    auto type = v.getType().cast<RankedTensorType>();
+    return type.getShape();
+  } else {
+    return v.getType().cast<UnrankedTensorType>().getShape();
+  }
 }
 
 void getGlobalShape(Value v, int *shape, int dim) {
@@ -619,13 +624,14 @@ FuncOp getFuncOp(StringRef func_name) {
 func::CallOp getCallOp(FuncOp func) {
   func::CallOp call = nullptr;
   for (auto each_func : m.getOps<FuncOp>()) {
-    WalkResult result = each_func.walk<WalkOrder::PreOrder>([&](func::CallOp op) {
-      if (!call && op.getCallee() == func.getName()) {
-        call = op;
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
+    WalkResult result =
+        each_func.walk<WalkOrder::PreOrder>([&](func::CallOp op) {
+          if (!call && op.getCallee() == func.getName()) {
+            call = op;
+            return WalkResult::interrupt();
+          }
+          return WalkResult::advance();
+        });
     if (result.wasInterrupted())
       break;
   }
@@ -653,6 +659,17 @@ bool isWeight(Value v) {
   return false;
 }
 
+bool isShapeRelatedOp(Value v) {
+  auto op = v.getDefiningOp();
+  if (op == nullptr) {
+    return false;
+  }
+  if (isa<top::ShapeOp, tpu::ShapeOp, tpu::ShapeSliceOp, tpu::ShapeCastOp>(op)) {
+    return true;
+  }
+  return false;
+}
+
 bool isAllWeight(Operation *op) {
   for (auto in : op->getOperands()) {
     if (isNone(in) || isWeight(in)) {
@@ -673,7 +690,9 @@ void setShapeOrVerify(Value v, llvm::ArrayRef<int64_t> shape) {
     v.setType(newType);
   } else {
     auto s = getShape(v);
-    if (s != shape) {
+    /* unranked tensor is okay, for example:
+       tensor<*xf32>->tensor<1xf32> */
+    if ((std::max(s.size(), shape.size()) > 1) && s != shape) {
       v.dump();
       llvm_unreachable("Shape Verify failed");
     }
@@ -723,9 +742,23 @@ void setNeuronAddr(int64_t addr) {
   m->setAttr(Attr::NEURON_ADDR, Builder(ctx).getI64IntegerAttr(addr));
 }
 
+llvm::StringRef getPostprocess() {
+  if (m->hasAttrOfType<StringAttr>(Attr::POSTPROCESS)) {
+    return m->getAttrOfType<StringAttr>(Attr::POSTPROCESS).strref();
+  }
+  return llvm::StringRef("");
+}
+
+void setPostprocess(StringRef post) {
+  m->setAttr(Attr::POSTPROCESS, Builder(ctx).getStringAttr(post));
+}
+
 Chip getChip() { return chip; }
 
 Mode getMode() {
+  if (false == m->hasAttrOfType<StringAttr>(Attr::MODE)) {
+    return Mode::F32;
+  }
   auto s = m->getAttrOfType<StringAttr>(Attr::MODE);
   return symbolizeMode(s).value_or(Mode::F32);
 }
@@ -805,9 +838,10 @@ bool isCV18xx() {
 }
 bool isBM1684Family() { return (chip == Chip::BM1684); }
 bool isBM1684XFamily() {
-  return (chip == Chip::BM1684X || chip == Chip::BM1686);
+  return (chip == Chip::BM1684X || chip == Chip::BM1686 ||
+          chip == Chip::CV186X);
 }
-bool isBM1686() { return (chip == Chip::BM1686); }
+bool isBM1686() { return (chip == Chip::BM1686 || chip == Chip::CV186X); }
 bool isBM1684X() { return (chip == Chip::BM1684X); }
 
 ModuleOp getModuleOp() { return m; }
@@ -1127,8 +1161,9 @@ void saveWeight() {
     func.walk([&](Operation *op) {
       if (op->getLoc().dyn_cast<NameLoc>() && !module::isOpInGroup(op)) {
         auto name = module::getName(op);
-        //if op have more than two regions, it can have the same op Name
-        if (all_names.find(name) != all_names.end() && !isa<tpu::YieldOp, tpu::IfOp>(op)) {
+        // if op have more than two regions, it can have the same op Name
+        if (all_names.find(name) != all_names.end() &&
+            !isa<tpu::YieldOp, tpu::IfOp>(op)) {
           op->dump();
           llvm_unreachable("op name conflict");
         }

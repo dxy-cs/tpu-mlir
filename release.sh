@@ -13,7 +13,7 @@ rm -rf ${release_archive}*
 cp -rf ${INSTALL_PATH} ${release_archive}
 
 cp -rf ${PROJECT_ROOT}/regression ${release_archive}
-rm -rf ${PROJECT_ROOT}/third_party/customlayer/build
+rm -rf ${release_archive}/regression/model
 cp -rf ${PROJECT_ROOT}/third_party/customlayer ${release_archive}
 
 # ------------------------------------------------------------------------------
@@ -34,8 +34,10 @@ export PATH=${TPUC_ROOT}/python/tools:$PATH
 export PATH=${TPUC_ROOT}/python/utils:$PATH
 export PATH=${TPUC_ROOT}/python/test:$PATH
 export PATH=${TPUC_ROOT}/python/samples:$PATH
+export PATH=${TPUC_ROOT}/customlayer/python:$PATH
 export LD_LIBRARY_PATH=$TPUC_ROOT/lib:$LD_LIBRARY_PATH
 export PYTHONPATH=${TPUC_ROOT}/python:$PYTHONPATH
+export PYTHONPATH=${TPUC_ROOT}/customlayer/python:$PYTHONPATH
 export MODEL_ZOO_PATH=${TPUC_ROOT}/../model-zoo
 export REGRESSION_PATH=${TPUC_ROOT}/regression
 //MY_CODE_STREAM
